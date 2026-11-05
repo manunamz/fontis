@@ -1,0 +1,23 @@
+{
+  "name": "pprhub",
+  "version": "0.1.0",
+  "description": "A GitHub for papers: citation lineage drawn as a commit graph",
+  "scripts": {
+    "start": "node server.js",
+    "snapshot": "node scripts/snapshot.js",
+    "test": "node --test \"test/unit/*.test.js\""
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT",
+  "keywords": [
+    "citations",
+    "citation graph",
+    "arxiv",
+    "openalex",
+    "provenance",
+    "version control",
+    "git"
+  ]
+}

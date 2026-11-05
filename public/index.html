@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>pprhub</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="icon" href="logo-mark.svg">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="./"><img class="brand-mark" src="logo-mark.svg" alt=""> pprhub</a>
+    <span class="tagline">a paper's references are its parent commits</span>
+    <button class="ghost" id="info-btn" title="what is pprhub?">?</button>
+    <button class="ghost" id="theme-toggle" title="toggle light/dark">◐</button>
+  </header>
+
+  <main>
+    <nav class="papers" id="papers" aria-label="papers"></nav>
+    <section class="paper-head" id="paper-head"></section>
+
+    <div class="controls">
+      <label>depth
+        <select id="depth"></select>
+      </label>
+      <label>parents per paper
+        <select id="parents">
+          <option value="1">1</option><option value="2">2</option><option value="3" selected>3</option>
+          <option value="4">4</option><option value="5">5</option>
+        </select>
+      </label>
+      <label class="check"><input type="checkbox" id="dead" checked> dead IDs</label>
+      <span class="legend">
+        <span><svg width="12" height="12"><circle cx="6" cy="6" r="4" fill="currentColor"/></svg> paper</span>
+        <span><svg width="12" height="12"><rect x="2" y="2" width="8" height="8" fill="none" stroke="currentColor" stroke-width="1.6"/></svg> no recorded refs</span>
+        <span><span class="legend-fade"></span> continues past view</span>
+        <span class="legend-dead"><svg width="12" height="12"><path d="M2.5 2.5l7 7m0-7l-7 7" stroke="currentColor" stroke-width="2"/></svg> dead ID</span>
+      </span>
+    </div>
+
+    <div class="workspace">
+      <section class="log" aria-label="citation lineage">
+        <div class="log-scroll">
+          <div class="log-header" id="log-header">
+            <span class="c-graph">graph</span>
+            <span class="c-msg">paper</span>
+            <span class="c-field">field</span>
+            <span class="c-num">refs</span>
+            <span class="c-num">cited</span>
+            <span class="c-year">year</span>
+          </div>
+          <div class="log-body" id="log-body"></div>
+          <div class="log-more" id="log-more" hidden></div>
+        </div>
+      </section>
+      <aside class="detail" id="detail" aria-live="polite"></aside>
+    </div>
+    <footer class="source" id="source"></footer>
+  </main>
+
+  <dialog id="info">
+    <h2>What is pprhub?</h2>
+    <p>Git records every commit's parents. Papers record theirs too: the bibliography. pprhub draws those links as a commit graph, so a lineage reads like <code>git log --graph</code>.</p>
+    <ul>
+      <li><strong>Commit</strong>: a paper.</li>
+      <li><strong>Parents</strong>: its references. Only the most cited are drawn; the controls change how many.</li>
+      <li><strong>Merge commit</strong>: a paper with several parents, which is nearly all of them.</li>
+      <li><strong>Shared ancestor</strong>: a paper where lines join, because several papers in view cite it.</li>
+      <li><strong>Spine</strong>: the straight line down the left, following each paper's most cited parent from the seed.</li>
+      <li><strong>Fading line</strong>: the paper has references this view doesn't reach. The trail carries on.</li>
+      <li><strong>Dead ID</strong>: a reference whose OpenAlex record returns 404. The work may exist elsewhere; the link is what's gone.</li>
+    </ul>
+    <p>Everything shown is measured from a dated OpenAlex snapshot. Nothing here says whether a paper is right. It shows what a paper rests on, and where the trail stops.</p>
+    <form method="dialog"><button>close</button></form>
+  </dialog>
+
+  <script src="lib/lineage.js"></script>
+  <script src="js/graph.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
