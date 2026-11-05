@@ -13,6 +13,14 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
+  // A citation can outrun its target's date by a year or two (preprints, late
+  // journal issues). Past that, the link or the date is likely wrong.
+  const SUSPECT_YEARS = 2;
+
+  function isSuspect(child, parent) {
+    return child.year != null && parent.year != null && parent.year - child.year > SUSPECT_YEARS;
+  }
+
   // Rank references the way a reader would skim them: most cited first, ties
   // broken by id so a snapshot always renders the same way.
   function rankParents(ids, nodes) {
@@ -23,24 +31,28 @@
 
   /*
    * Pick the visible subgraph: walk from the seed, following each paper's top
-   * `parents` references down to `depth`. Dead references are kept (when
+   * `parents` references down to `depth`. Papers in `expanded` show all of
+   * their references, even from beyond `depth`. Dead references are kept (when
    * `showDead`) because they are the point: pointers that open onto air. A
    * paper's dead references share one stub, so they can't crowd out the lineage.
    *
    * Returns { ids, edges, nodes } where edges are [child, parent] pairs and
    * nodes is the snapshot's plus those stubs.
    */
-  function select(snapshot, { depth = 3, parents = 3, showDead = true } = {}) {
+  function select(snapshot, { depth = 3, parents = 3, showDead = true, expanded = new Set() } = {}) {
     const { seed } = snapshot;
     const nodes = { ...snapshot.nodes };
     const seen = new Set([seed]);
     const edges = [];
     let level = [seed];
-    for (let d = 1; d <= depth; d++) {
+    for (let d = 1; level.length; d++) {
       const next = [];
       for (const id of level) {
+        const open = expanded.has(id);
+        if (d > depth && !open) continue;
         const node = nodes[id];
-        const top = rankParents(node.parents || [], nodes).slice(0, parents);
+        const ranked = rankParents(node.parents || [], nodes);
+        const top = open ? ranked : ranked.slice(0, parents);
         for (const pid of top) {
           edges.push([id, pid]);
           if (!seen.has(pid)) { seen.add(pid); next.push(pid); }
@@ -135,7 +147,8 @@
    * Returns { rows: [{ id, row, lane, color }], edges, lanes, cut } where each
    * edge is { child, parent, from, to, fromLane, via, toLane, color, join } in
    * row/lane coordinates: leave `from`, run down lane `via`, arrive at `to`.
-   * `join` marks an edge that merged into a lane already open.
+   * `join` marks an edge that merged into a lane already open, and `suspect`
+   * one whose parent is dated well after its child.
    */
   function layout(ids, allEdges, nodes) {
     const { rows, edges, cut } = order(ids, allEdges, nodes);
@@ -197,7 +210,7 @@
           edgeColor = nextColor++;
           via = openLane(pid, edgeColor);
         }
-        const path = { child: id, parent: pid, from: row, to: rowOf.get(pid), fromLane: lane, via, toLane: via, color: edgeColor, join };
+        const path = { child: id, parent: pid, from: row, to: rowOf.get(pid), fromLane: lane, via, toLane: via, color: edgeColor, join, suspect: isSuspect(nodes[id], nodes[pid]) };
         paths.push(path);
         if (!arrivals.has(pid)) arrivals.set(pid, []);
         arrivals.get(pid).push(path);
@@ -240,6 +253,77 @@
     return layout.rows.filter((r) => nodes[r.id].resolvedCount > 0 && !drawn.has(r.id));
   }
 
+  // Each visible paper's count of resolved references the view isn't drawing.
+  function hiddenParents(view) {
+    const drawn = new Map();
+    for (const [child, parent] of view.edges) {
+      if (!view.nodes[parent].missing) drawn.set(child, (drawn.get(child) || 0) + 1);
+    }
+    const hidden = new Map();
+    for (const id of view.ids) {
+      const node = view.nodes[id];
+      hidden.set(id, (node.parentTotal ?? (node.parents || []).length) - (drawn.get(id) || 0));
+    }
+    return hidden;
+  }
+
+  /*
+   * Rotate the graph: a fixed window of side lanes on a loop, so turning either
+   * way brings the far side around. The spine stays pinned. Every paper keeps
+   * its row: turning only fills or empties rows, so nothing shifts vertically.
+   * A link leaving the window becomes a tail, merged per row and direction, at
+   * whichever of its ends is in view.
+   *
+   * Returns { rows, edges, stubs, lanes, offset, sideLanes, rotates, totalRows }.
+   * Rows keep their `layout` numbers; lanes are renumbered for the window.
+   */
+  function windowView(layout, { offset = 0, width = 12 } = {}) {
+    const sideLanes = layout.lanes - 1;
+    if (sideLanes <= width) {
+      return { rows: layout.rows, edges: layout.edges, stubs: [], lanes: layout.lanes, offset: 0, sideLanes, rotates: false, totalRows: layout.rows.length };
+    }
+    const turned = ((offset % sideLanes) + sideLanes) % sideLanes;
+    const place = (lane) => (lane - 1 - turned + sideLanes) % sideLanes;
+    const visible = (lane) => {
+      if (lane === 0) return 0;
+      const at = place(lane);
+      return at < width ? at + 1 : null;
+    };
+    // Which way round is shorter to reach a lane that's out of view.
+    const towards = (lane) => (place(lane) - width < sideLanes - place(lane) ? 1 : -1);
+
+    const rows = [];
+    for (const row of layout.rows) {
+      const lane = visible(row.lane);
+      if (lane !== null) rows.push({ ...row, lane });
+    }
+
+    const edges = [];
+    const stubs = new Map();
+    const addStub = (row, lane, dir, color) => {
+      const key = `${row}:${dir}`;
+      if (stubs.has(key)) stubs.get(key).count++;
+      else stubs.set(key, { row, lane, dir, color, count: 1 });
+    };
+    for (const e of layout.edges) {
+      const [from, via, to] = [visible(e.fromLane), visible(e.via), visible(e.toLane)];
+      if (from !== null && via !== null && to !== null) {
+        edges.push({ ...e, fromLane: from, via, toLane: to });
+        continue;
+      }
+      const away = [e.via, e.toLane, e.fromLane].find((lane) => visible(lane) === null);
+      if (from !== null) addStub(e.from, from, towards(away), e.color);
+      if (to !== null) addStub(e.to, to, towards(away), e.color);
+    }
+    return { rows, edges, stubs: [...stubs.values()], lanes: width + 1, offset: turned, sideLanes, rotates: true, totalRows: layout.rows.length };
+  }
+
+  // The rotation that centres a lane in the window.
+  function offsetFor(lane, { width = 12, sideLanes }) {
+    if (lane === 0) return null;
+    return (lane - 1 - Math.floor(width / 2) + sideLanes) % sideLanes;
+  }
+
   // How many papers measured down to `depth` the view leaves out.
   function hiddenCount(view, snapshot, depth) {
     const measured = snapshot.levels.filter((l) => l.depth <= depth).reduce((sum, l) => sum + l.papers, 0);
@@ -252,5 +336,5 @@
     return Math.max(0, measured - shown.size);
   }
 
-  return { select, order, layout, lineage, rankParents, frontier, hiddenCount };
+  return { select, order, layout, lineage, rankParents, frontier, hiddenCount, hiddenParents, isSuspect, windowView, offsetFor };
 });

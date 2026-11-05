@@ -1,7 +1,7 @@
 'use strict';
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { select, order, layout, lineage, frontier, hiddenCount } = require('../../public/lib/lineage');
+const { select, order, layout, lineage, frontier, hiddenCount, hiddenParents, windowView, offsetFor } = require('../../public/lib/lineage');
 
 const paper = (id, year, cited, parents = [], dead = []) => ({ id, title: id, year, cited, parents, dead });
 
@@ -178,4 +178,118 @@ test('hiddenCount subtracts shown papers and each dead id once', () => {
   snap.levels = [{ depth: 1, papers: 10 }, { depth: 2, papers: 100 }];
   assert.equal(hiddenCount(select(snap, { depth: 1 }), snap, 1), 7);
   assert.equal(hiddenCount(select(snap, { depth: 2 }), snap, 2), 107);
+});
+
+test('an expanded paper shows all of its references', () => {
+  const snap = snapshot(
+    paper('seed', 2017, 100, ['a', 'b', 'c']),
+    paper('a', 2015, 3),
+    paper('b', 2015, 2),
+    paper('c', 2015, 1),
+  );
+  assert.equal(select(snap, { parents: 1 }).ids.length, 2);
+  assert.equal(select(snap, { parents: 1, expanded: new Set(['seed']) }).ids.length, 4);
+});
+
+test('expanding a paper at the depth limit reaches past it, and only there', () => {
+  const snap = snapshot(
+    paper('seed', 2017, 100, ['a', 'b']),
+    paper('a', 2015, 50, ['c']),
+    paper('b', 2015, 40, ['d']),
+    paper('c', 2010, 20),
+    paper('d', 2010, 10),
+  );
+  assert.deepEqual(select(snap, { depth: 1, expanded: new Set(['a']) }).ids.sort(), ['a', 'b', 'c', 'seed']);
+});
+
+test('hiddenParents counts resolved references the view leaves out', () => {
+  const snap = snapshot(
+    paper('seed', 2017, 100, ['a', 'b', 'c'], ['x']),
+    paper('a', 2015, 3),
+    paper('b', 2015, 2),
+    paper('c', 2015, 1),
+  );
+  const hidden = hiddenParents(select(snap, { parents: 2 }));
+  assert.equal(hidden.get('seed'), 1);
+  assert.equal(hidden.get('a'), 0);
+});
+
+test('a parent dated more than two years after its child is suspect', () => {
+  const snap = snapshot(
+    paper('seed', 2010, 100, ['ok', 'bad', 'undated']),
+    paper('ok', 2012, 50),
+    paper('bad', 2013, 40),
+    paper('undated', null, 30),
+  );
+  const view = select(snap);
+  const out = layout(view.ids, view.edges, view.nodes);
+  assert.deepEqual(out.edges.filter((e) => e.suspect).map((e) => e.parent), ['bad']);
+});
+
+// A seed with `n` parents, each one row down, so each takes its own lane.
+function fan(n) {
+  const parents = Array.from({ length: n }, (_, i) => `p${i}`);
+  const nodes = [paper('seed', 2017, 1000, parents)];
+  parents.forEach((id, i) => nodes.push(paper(id, 2016 - i, 900 - i)));
+  const snap = snapshot(...nodes);
+  const view = select(snap, { parents: n, depth: 1 });
+  return layout(view.ids, view.edges, view.nodes);
+}
+
+test('windowView leaves a graph that already fits alone', () => {
+  const out = fan(4);
+  const win = windowView(out, { width: 12 });
+  assert.equal(win.rotates, false);
+  assert.equal(win.rows.length, out.rows.length);
+});
+
+test('windowView keeps the spine and only papers on lanes in view', () => {
+  const out = fan(10);
+  const win = windowView(out, { offset: 0, width: 3 });
+  assert.equal(win.rotates, true);
+  assert.equal(win.lanes, 4);
+  assert.ok(win.rows.some((r) => r.id === 'seed' && r.lane === 0));
+  assert.ok(win.rows.every((r) => r.lane <= 3));
+  assert.equal(win.rows.length, 5); // seed, its first parent on the spine, three side lanes
+  assert.equal(win.totalRows, out.rows.length);
+});
+
+test('a paper keeps its row at every rotation', () => {
+  const out = fan(10);
+  const home = new Map(out.rows.map((r) => [r.id, r.row]));
+  for (let offset = 0; offset < 9; offset++) {
+    for (const r of windowView(out, { offset, width: 3 }).rows) assert.equal(r.row, home.get(r.id));
+  }
+});
+
+test('turning swaps which papers have rows and wraps around both ways', () => {
+  const out = fan(10);
+  const ids = (offset) => windowView(out, { offset, width: 3 }).rows.map((r) => r.id).join();
+  assert.notEqual(ids(0), ids(3));
+  assert.equal(ids(-9), ids(0));
+  assert.equal(ids(9), ids(0));
+  assert.equal(windowView(out, { offset: -1, width: 3 }).offset, 8);
+});
+
+test('links leaving the window become one merged tail per row and direction', () => {
+  const win = windowView(fan(10), { offset: 0, width: 3 });
+  const seedRow = win.rows.find((r) => r.id === 'seed').row;
+  const tails = win.stubs.filter((s) => s.row === seedRow);
+  assert.ok(tails.length >= 1 && tails.length <= 2);
+  assert.equal(tails.reduce((sum, s) => sum + s.count, 0), 6);
+});
+
+test('every drawn edge in a window has both ends on rows in view', () => {
+  const win = windowView(fan(10), { offset: 2, width: 3 });
+  for (const e of win.edges) {
+    assert.equal(win.rows.find((r) => r.row === e.from).id, e.child);
+    assert.equal(win.rows.find((r) => r.row === e.to).id, e.parent);
+  }
+});
+
+test('offsetFor brings a lane into the window', () => {
+  const out = fan(10);
+  const target = out.rows.find((r) => r.id === 'p8');
+  const offset = offsetFor(target.lane, { width: 3, sideLanes: out.lanes - 1 });
+  assert.ok(windowView(out, { offset, width: 3 }).rows.some((r) => r.id === 'p8'));
 });

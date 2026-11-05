@@ -19,27 +19,44 @@
     <nav class="papers" id="papers" aria-label="papers"></nav>
     <section class="paper-head" id="paper-head"></section>
 
+    <section class="overview" id="overview" aria-label="the whole citation tree" hidden>
+      <div class="overview-stats" id="overview-stats"></div>
+      <div class="overview-plot"><canvas id="tree-canvas"></canvas></div>
+      <p class="overview-hint" id="overview-hint">Every dot is a paper, oldest on the left. Hover for details; click one to open it in the graph.</p>
+    </section>
+
     <div class="controls">
       <label>depth
         <select id="depth"></select>
       </label>
       <label>parents per paper
         <select id="parents">
-          <option value="1">1</option><option value="2">2</option><option value="3" selected>3</option>
-          <option value="4">4</option><option value="5">5</option>
+          <option value="1">1</option><option value="2">2</option><option value="3">3</option>
+          <option value="4">4</option><option value="5" selected>5</option>
         </select>
       </label>
       <label class="check"><input type="checkbox" id="dead" checked> dead IDs</label>
+      <button class="ghost text" id="show-all" type="button">show all</button>
+      <button class="ghost text" id="graph-only" type="button">graph only</button>
       <span class="legend">
         <span><svg width="12" height="12"><circle cx="6" cy="6" r="4" fill="currentColor"/></svg> paper</span>
         <span><svg width="12" height="12"><rect x="2" y="2" width="8" height="8" fill="none" stroke="currentColor" stroke-width="1.6"/></svg> no recorded refs</span>
         <span><span class="legend-fade"></span> continues past view</span>
+        <span class="legend-suspect"><svg width="16" height="12"><path d="M1 6h14" stroke="currentColor" stroke-width="2" stroke-dasharray="2 3" stroke-linecap="round"/></svg> suspect link</span>
         <span class="legend-dead"><svg width="12" height="12"><path d="M2.5 2.5l7 7m0-7l-7 7" stroke="currentColor" stroke-width="2"/></svg> dead ID</span>
       </span>
     </div>
 
     <div class="workspace">
-      <section class="log" aria-label="citation lineage">
+      <section class="log" id="log" aria-label="citation lineage">
+        <div class="rotator" id="rotator" hidden>
+          <button class="ghost" id="spin-left" type="button" title="turn one window left" aria-label="turn left">‹</button>
+          <input type="range" id="spin" min="0" max="0" value="0" aria-label="turn the graph">
+          <button class="ghost" id="spin-right" type="button" title="turn one window right" aria-label="turn right">›</button>
+          <span class="spin-label" id="spin-label"></span>
+          <button class="ghost text" id="graph-exit" type="button">exit</button>
+        </div>
+        <div class="full-graph" id="full-graph" hidden><canvas id="full-canvas"></canvas></div>
         <div class="log-scroll">
           <div class="log-header" id="log-header">
             <span class="c-graph">graph</span>
@@ -63,11 +80,13 @@
     <p>Git records every commit's parents. Papers record theirs too: the bibliography. pprhub draws those links as a commit graph, so a lineage reads like <code>git log --graph</code>.</p>
     <ul>
       <li><strong>Commit</strong>: a paper.</li>
-      <li><strong>Parents</strong>: its references. Only the most cited are drawn; the controls change how many.</li>
+      <li><strong>Parents</strong>: its references. Only the most cited are drawn; the controls change how many, and <strong>+n</strong> on a row shows all of that paper's.</li>
       <li><strong>Merge commit</strong>: a paper with several parents, which is nearly all of them.</li>
       <li><strong>Shared ancestor</strong>: a paper where lines join, because several papers in view cite it.</li>
       <li><strong>Spine</strong>: the straight line down the left, following each paper's most cited parent from the seed.</li>
+      <li><strong>Turning the graph</strong>: drag across it, or use the slider. Lanes sit on a loop. Each paper keeps its row, which fills when its lane is in view. A short tail means a link leaves the window. <strong>Graph only</strong> shows the entire graph and the window you're turning.</li>
       <li><strong>Fading line</strong>: the paper has references this view doesn't reach. The trail carries on.</li>
+      <li><strong>Suspect link</strong>: a paper dated more than two years after one citing it, which usually means a bad match or a wrong date.</li>
       <li><strong>Dead ID</strong>: a reference whose OpenAlex record returns 404. The work may exist elsewhere; the link is what's gone.</li>
     </ul>
     <p>Everything shown is measured from a dated OpenAlex snapshot. Nothing here says whether a paper is right. It shows what a paper rests on, and where the trail stops.</p>
@@ -76,6 +95,8 @@
 
   <script src="lib/lineage.js"></script>
   <script src="js/graph.js"></script>
+  <script src="js/overview.js"></script>
+  <script src="js/fullgraph.js"></script>
   <script src="js/app.js"></script>
 </body>
 </html>

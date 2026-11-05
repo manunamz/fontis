@@ -8,6 +8,8 @@ const LANE_W = 16;
 const GRAPH_PAD = 12;
 const SIDE_COLORS = 4;
 const FADE_LENGTH = 20;
+const STUB_REACH = 14;
+const STUB_DROP = 9;
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
 const laneX = (lane) => GRAPH_PAD + lane * LANE_W;
@@ -82,11 +84,18 @@ function fadeStub(row) {
   return stub;
 }
 
-function drawGraph(layout, nodes, seed) {
+// A tail for links that leave the window, leaning the way they went.
+function stubPath(stub) {
+  const x = laneX(stub.lane);
+  const y = rowY(stub.row);
+  return `M ${x} ${y} q ${stub.dir * 7} 1 ${stub.dir * STUB_REACH} ${STUB_DROP}`;
+}
+
+function drawGraph(layout, nodes, seed, frontier) {
   const svg = svgEl('svg', {
     class: 'graph',
     width: graphWidth(layout.lanes),
-    height: layout.rows.length * ROW_H,
+    height: layout.totalRows * ROW_H,
     'aria-hidden': 'true',
   });
   svg.appendChild(fadeDefs());
@@ -94,13 +103,16 @@ function drawGraph(layout, nodes, seed) {
     const dead = nodes[e.parent].missing;
     const path = svgEl('path', {
       d: edgePath(e),
-      class: `edge lane-${colorIndex(e.color)}${dead ? ' edge-dead' : ''}${e.join ? ' edge-join' : ''}`,
+      class: `edge lane-${colorIndex(e.color)}${dead ? ' edge-dead' : ''}${e.join ? ' edge-join' : ''}${e.suspect ? ' edge-suspect' : ''}`,
     });
     path.dataset.child = e.child;
     path.dataset.parent = e.parent;
     svg.appendChild(path);
   }
-  for (const row of Lineage.frontier(layout, nodes)) svg.appendChild(fadeStub(row));
+  for (const stub of layout.stubs) {
+    svg.appendChild(svgEl('path', { d: stubPath(stub), class: `stub lane-${colorIndex(stub.color)}` }));
+  }
+  for (const row of layout.rows) if (frontier.has(row.id)) svg.appendChild(fadeStub(row));
   for (const row of layout.rows) {
     const mark = nodeMark(row, nodes[row.id], row.id === seed);
     mark.dataset.id = row.id;

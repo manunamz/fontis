@@ -10,13 +10,18 @@ Git records every commit's parents, so any line of code can be traced to where i
 
 pprhub draws citation lineage as a commit graph. A bibliography is a merge commit, a shared ancestor is where lines join, and a dead reference is a branch that ends in a red ✗.
 
-NOTE: pprhub is a proof-of-concept demo. It renders dated snapshots of two papers so far.
+NOTE: pprhub is a proof-of-concept demo. It renders dated snapshots of two papers so far, and no live crawling from the browser yet.
 
 ## What's here
 
+- **Overview**: the whole measured tree at once, one dot per paper by depth and year, with dead ends in colour. Click a dot to open that paper in the graph.
+- **Rotate**: the graph has a maximum width, and its lanes sit on a loop. Drag or spin it, or use the slider. Every paper keeps its row, which fills when its lane comes into view, so nothing shifts vertically. The spine stays pinned, and a trace turns the graph to keep up.
+- **Graph only**: the entire graph fitted to one screen, with a band marking the window you're rotating. Drag to move it, and Esc returns to the table at that spot.
 - **Log**: the ancestry of *Attention Is All You Need* or Watson and Crick's 1953 DNA paper as a source-tree-style graph, newest first, with the seed's most cited line as a straight spine. Choose the depth and how many parents each paper shows.
+- **Expand**: `+n` on a row draws all of that paper's references, even past the depth limit if the snapshot has them. **Show all** does it for every paper.
 - **Trace**: select a paper to light up its line back to the seed and everything beneath it.
 - **Dead ends**: references with no OpenAlex record, and papers with no recorded references, are marked where the trail stops. A line that fades out has more references beyond the view.
+- **Suspect links**: a paper dated more than two years after one citing it gets a dotted amber link, because that usually means a bad match or a wrong date.
 
 Every number is measured from OpenAlex on the date shown. Nothing here says whether a paper is right. It shows what a paper rests on, and where the trail stops.
 
@@ -31,12 +36,18 @@ Needs Node ≥18, with no dependencies. The site is static: to deploy, point any
 ## Snapshots
 
 ```bash
-$ node scripts/snapshot.js attention 1706.03762 --depth 3
+$ node scripts/snapshot.js attention 1706.03762 --depth 4 --detail 3
 ```
 
-This takes an arXiv ID, DOI, or OpenAlex ID, crawls the full ancestry to get measured counts per level, then saves what the UI draws to `public/snapshots/`: all of the seed's references, and each other paper's five most cited, plus every dead reference along the way.
+This takes an arXiv ID, DOI, or OpenAlex ID, crawls the full ancestry to get measured counts per level, then writes three files to `public/snapshots/`:
 
-arXiv's own API has no reference data, so arXiv IDs are resolved through OpenAlex (`doi:10.48550/arXiv.<id>`). The crawl above spends about $0.013 of OpenAlex's $0.10 anonymous daily budget. Single lookups are free, so `--single` keeps working when that budget runs out, at about 8 papers a second.
+- `<slug>.json`: the first load, with each paper's top five references down to `--detail`
+- `<slug>.full.json`: every paper and link down to `--detail`, fetched on the first expand
+- `<slug>.tree.json`: one dot per paper down to `--depth`, for the overview
+
+Fetched papers are cached in `.snapshot-cache/`, so a long crawl can pick up where it stopped. If the budget runs out mid-crawl, it carries on with single lookups.
+
+arXiv's own API has no reference data, so arXiv IDs are resolved through OpenAlex (`doi:10.48550/arXiv.<id>`). List calls cost $0.0001 per 50 papers from OpenAlex's $0.10 anonymous daily budget. Single lookups are free, at about 4 papers a second, and `--single` uses only those.
 
 To add a paper to the site, list its slug in `PAPERS` in `public/js/app.js`.
 
@@ -49,6 +60,7 @@ An ID counts as dead only if the single-work route returns 404. Batch queries si
 1. **`select`** walks from the seed, following each paper's top references to the chosen depth.
 2. **`order`** sorts children above parents, newest first where that's possible. Years alone can't do it, because citations sometimes point forward in time. An edge that closes a citation cycle is cut and reported in the footer, since a commit graph can't draw one.
 3. **`layout`** assigns lanes the way SourceTree does: a paper lands on the leftmost lane waiting for it, its most cited parent continues that lane, and other parents open new lanes or join one already waiting. Lane 0 is reserved for the seed's first-parent line.
+4. **`windowView`** rotates the graph: it keeps the spine plus a window of lanes on a loop, fills only the rows of papers on those lanes, and turns links leaving the window into short tails.
 
 `public/js/graph.js` draws the result as SVG, and `public/js/app.js` is the rest of the page.
 
