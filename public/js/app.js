@@ -20,6 +20,7 @@ let snapshot = null;
 let view = null;
 let layout = null;
 let frame = null; // the rotated window onto `layout`
+let table = null; // `frame` as the table draws it
 let frontier = new Set();
 let childCount = new Map();
 let suspectsOf = new Map();
@@ -27,7 +28,8 @@ let hiddenRefs = new Map();
 let selected = null;
 let offset = 0;
 let paintQueued = false;
-let tableWindow = MIN_WINDOW;
+let paintedLayout = null;
+let closeGaps = true;
 const expanded = new Set();
 
 function el(tag, className, text) {
@@ -247,50 +249,73 @@ function indexLayout() {
 
 function render() {
   view = Lineage.select(snapshot, currentOptions());
-  layout = Lineage.layout(view.ids, view.edges, view.nodes);
+  layout = Lineage.layout(view.ids, view.edges, view.nodes, { grouped: isConeView() });
   if (selected && !view.ids.includes(selected)) selected = null;
   indexLayout();
   paint();
   renderSource();
 }
 
-const isGraphOnly = () => document.body.classList.contains('graph-only');
+const isConeView = () => document.body.classList.contains('cone-view');
 
-// Graph only keeps the table's window, so its band is what the table will show.
 function windowWidth() {
-  if (isGraphOnly()) return tableWindow;
   const room = $('log').clientWidth * GRAPH_SHARE - GRAPH_PAD * 2;
   return Math.min(MAX_WINDOW, Math.max(MIN_WINDOW, Math.floor(room / LANE_W)));
 }
 
-// Redraw the window. Cheap compared with `render`, so turning the graph is live.
-function paint() {
-  frame = Lineage.windowView(layout, { offset, width: windowWidth() });
-  offset = frame.offset;
-  renderRotator();
-  if (isGraphOnly()) {
-    drawFullGraph(layout, view.nodes, frame);
-    return;
-  }
-  document.documentElement.style.setProperty('--graph-w', `${graphWidth(frame.lanes)}px`);
-  const body = $('log-body');
-  body.style.height = `${frame.totalRows * ROW_H}px`;
-  body.replaceChildren(drawGraph(frame, view.nodes, snapshot.seed, frontier), ...frame.rows.map(renderRow));
-  applySelection();
-  renderMore();
+// The stretch of the cone's height scrolled into view in the table.
+function rowsInSight() {
+  const scroller = $('log-scroll');
+  const end = Math.max(layout.rows.length - 1, 1);
+  const last = table.rows.length - 1;
+  const at = (px) => {
+    const row = Math.floor(px / ROW_H);
+    return (closeGaps ? table.rows[Math.max(0, Math.min(last, row))].from : Math.min(row, end)) / end;
+  };
+  return { from: at(scroller.scrollTop), to: at(scroller.scrollTop + scroller.clientHeight) };
 }
 
-function setGraphOnly(on) {
+// Redraw the window. Cheap compared with `render`, so turning the graph is live.
+// `offset` can sit between lanes; the cone shows that, and the table rounds it.
+function paint() {
+  const previous = frame;
+  const keep = selected ? Lineage.connections(selected, layout.edges) : new Set();
+  frame = Lineage.windowView(layout, { offset: Math.round(offset), width: windowWidth(), keep });
+  offset = frame.rotates ? ((offset % frame.sideLanes) + frame.sideLanes) % frame.sideLanes : 0;
+  renderRotator();
+  const moved = paintedLayout !== layout || previous.offset !== frame.offset || previous.lanes !== frame.lanes;
+  if (isConeView() && !moved) {
+    drawCone(layout, view.nodes, frame, offset, rowsInSight());
+    return;
+  }
+  paintedLayout = layout;
+  // A window fills few rows of a wide graph, so by default the gaps close up.
+  table = closeGaps ? Lineage.compactRows(frame) : frame;
+  document.documentElement.style.setProperty('--graph-w', `${graphWidth(frame.drawnLanes)}px`);
+  const body = $('log-body');
+  body.style.height = `${table.totalRows * ROW_H}px`;
+  body.replaceChildren(drawGraph(table, view.nodes, snapshot.seed, frontier), ...table.rows.map(renderRow));
+  applySelection();
+  renderMore();
+  if (isConeView()) drawCone(layout, view.nodes, frame, offset, rowsInSight());
+}
+
+function setConeView(on) {
   withFull(() => {
-    if (on) {
-      tableWindow = windowWidth();
-      setShowAll(true);
-    }
-    document.body.classList.toggle('graph-only', on);
-    $('full-graph').hidden = !on;
+    if (on) setShowAll(true);
+    document.body.classList.toggle('cone-view', on);
+    $('cone').hidden = !on;
+    offset = 0;
     window.scrollTo(0, 0);
     render();
   });
+}
+
+function toggleGaps() {
+  closeGaps = !closeGaps;
+  $('cone-gaps').textContent = closeGaps ? 'fixed rows' : 'close gaps';
+  paintedLayout = null;
+  paint();
 }
 
 function queuePaint() {
@@ -304,9 +329,15 @@ function turnTo(next) {
   queuePaint();
 }
 
+// The line of descent at the middle of the window.
+function frontSector() {
+  const middle = (frame.offset + Math.floor((frame.lanes - 1) / 2)) % frame.sideLanes + 1;
+  return layout.sectors.find((s) => s.first != null && s.first <= middle && middle <= s.last);
+}
+
 function renderRotator() {
-  const { rotates, sideLanes, lanes } = frame;
-  $('rotator').hidden = !rotates && !isGraphOnly();
+  const { rotates, sideLanes } = frame;
+  $('rotator').hidden = !rotates && !isConeView();
   $('rotator').classList.toggle('still', !rotates);
   $('log-body').classList.toggle('rotates', rotates);
   if (!rotates) {
@@ -315,10 +346,11 @@ function renderRotator() {
   }
   const spin = $('spin');
   spin.max = sideLanes - 1;
-  spin.value = offset;
-  const width = lanes - 1;
-  const last = (offset + width - 1) % sideLanes + 1;
-  $('spin-label').textContent = `lanes ${offset + 1}–${last} of ${sideLanes} · ${frame.rows.length.toLocaleString()} of ${layout.rows.length.toLocaleString()} rows filled`;
+  spin.value = frame.offset;
+  const front = frontSector();
+  const name = front ? `${view.nodes[front.id].title} · ${front.papers.toLocaleString()} papers · ` : '';
+  $('spin-label').textContent = `${name}${frame.rows.length.toLocaleString()} of ${layout.rows.length.toLocaleString()} rows filled`;
+  $('spin-label').title = name;
 }
 
 function renderMore() {
@@ -354,18 +386,29 @@ function applySelection() {
   renderDetail();
 }
 
-// Selecting a paper on a lane out of view turns the graph to it.
+const rowTop = (id) => document.querySelector(`.log-row[data-id="${id}"]`)?.getBoundingClientRect().top;
+
+// Selecting a paper brings its connections into the table, which moves rows
+// around, so the paper clicked stays where it is on screen. One on a lane out
+// of view turns the graph to it.
 function select(id) {
+  const anchor = id || selected;
+  const before = anchor && rowTop(anchor);
   selected = id;
   const row = id && layout.rows.find((r) => r.id === id);
-  const inView = id && frame.rows.some((r) => r.id === id);
-  if (row && !inView) {
+  if (row && !frame.rows.some((r) => r.id === id)) {
     offset = Lineage.offsetFor(row.lane, { width: frame.lanes - 1, sideLanes: frame.sideLanes });
-    paint();
-    document.querySelector(`.log-row[data-id="${id}"]`)?.scrollIntoView({ block: 'center' });
-  } else {
-    applySelection();
   }
+  paintedLayout = null;
+  paint();
+  if (before === undefined || before === null) {
+    if (id) document.querySelector(`.log-row[data-id="${id}"]`)?.scrollIntoView({ block: 'center' });
+    return;
+  }
+  const after = rowTop(anchor);
+  if (after === undefined) return;
+  if (isConeView()) $('log-scroll').scrollTop += after - before;
+  else window.scrollBy(0, after - before);
 }
 
 function fact(label, value) {
@@ -374,10 +417,9 @@ function fact(label, value) {
   return row;
 }
 
-function parentList(id) {
+function paperList(papers) {
   const list = el('ul', 'parents');
-  const parents = layout.edges.filter((e) => e.child === id).map((e) => view.nodes[e.parent]);
-  for (const p of parents) {
+  for (const p of papers) {
     const li = el('li');
     const btn = el('button', 'linklike', p.missing ? deadLabel(p) : p.title);
     btn.type = 'button';
@@ -445,10 +487,12 @@ function renderDetail() {
   if (node.refCount === 0) {
     pane.append(el('p', 'muted', 'The trail stops here: OpenAlex has no references recorded for this paper. That says nothing about whether the paper cited anything.'));
   } else if (layout.edges.some((e) => e.child === selected)) {
-    pane.append(el('h3', null, 'Parents shown'), parentList(selected));
+    pane.append(el('h3', null, 'Parents shown'), paperList(layout.edges.filter((e) => e.child === selected).map((e) => view.nodes[e.parent])));
   } else {
     pane.append(el('p', 'muted', 'Its references are past what this view draws.'));
   }
+  const citers = layout.edges.filter((e) => e.parent === selected).map((e) => view.nodes[e.child]);
+  if (citers.length) pane.append(el('h3', null, 'Cited by'), paperList(citers));
 }
 
 function initTheme() {
@@ -465,29 +509,25 @@ function initTheme() {
   });
 }
 
-// Drag or swipe across the graph to turn it; let go mid-swipe and it keeps
-// spinning for a moment.
-function initRotation() {
-  const body = $('log-body');
-  const lanesPerPx = 1 / LANE_W;
+// Drag or swipe across `target` to turn the graph; let go mid-swipe and it keeps
+// spinning for a moment. `lanesPerPx` and `inReach` are asked at each gesture.
+function addSpin(target, lanesPerPx, inReach, stopSpin, setSpinning) {
   let drag = null;
-  let spinning = null;
-  const stopSpin = () => { if (spinning) cancelAnimationFrame(spinning); spinning = null; };
 
-  body.addEventListener('pointerdown', (e) => {
-    if (!frame.rotates || e.clientX - body.getBoundingClientRect().left > graphWidth(frame.lanes)) return;
+  target.addEventListener('pointerdown', (e) => {
+    if (!frame.rotates || !inReach(e)) return;
     stopSpin();
-    drag = { x: e.clientX, start: offset, moved: false, lastX: e.clientX, lastT: e.timeStamp, speed: 0 };
+    drag = { x: e.clientX, start: offset, moved: false, lastX: e.clientX, lastT: e.timeStamp, speed: 0, rate: lanesPerPx() };
   });
-  body.addEventListener('pointermove', (e) => {
+  target.addEventListener('pointermove', (e) => {
     if (!drag) return;
     const dx = e.clientX - drag.x;
     if (!drag.moved && Math.abs(dx) < 4) return;
-    if (!drag.moved) { drag.moved = true; body.setPointerCapture(e.pointerId); }
-    drag.speed = (drag.lastX - e.clientX) * lanesPerPx / Math.max(1, e.timeStamp - drag.lastT);
+    if (!drag.moved) { drag.moved = true; target.setPointerCapture(e.pointerId); }
+    drag.speed = (drag.lastX - e.clientX) * drag.rate / Math.max(1, e.timeStamp - drag.lastT);
     drag.lastX = e.clientX;
     drag.lastT = e.timeStamp;
-    turnTo(Math.round(drag.start - dx * lanesPerPx));
+    turnTo(drag.start - dx * drag.rate);
   });
   const release = (e) => {
     if (!drag) return;
@@ -495,8 +535,8 @@ function initRotation() {
     const stale = e.timeStamp - drag.lastT > 80;
     drag = null;
     if (!moved) return;
-    body.classList.add('just-dragged');
-    setTimeout(() => body.classList.remove('just-dragged'));
+    target.classList.add('just-dragged');
+    setTimeout(() => target.classList.remove('just-dragged'));
     if (stale || matchMedia('(prefers-reduced-motion: reduce)').matches) return;
     let velocity = speed;
     let position = offset;
@@ -505,37 +545,41 @@ function initRotation() {
       position += velocity * (now - last);
       last = now;
       velocity *= SPIN_FRICTION;
-      turnTo(Math.round(position));
-      spinning = Math.abs(velocity) > SPIN_STOP ? requestAnimationFrame(coast) : null;
+      turnTo(position);
+      setSpinning(Math.abs(velocity) > SPIN_STOP ? requestAnimationFrame(coast) : null);
     };
-    spinning = requestAnimationFrame(coast);
+    setSpinning(requestAnimationFrame(coast));
   };
-  body.addEventListener('pointerup', release);
-  body.addEventListener('pointercancel', release);
-  body.addEventListener('click', (e) => {
-    if (body.classList.contains('just-dragged')) e.stopPropagation();
+  target.addEventListener('pointerup', release);
+  target.addEventListener('pointercancel', release);
+  target.addEventListener('click', (e) => {
+    if (target.classList.contains('just-dragged')) e.stopPropagation();
   }, true);
 
   let wheelRest = 0;
-  body.addEventListener('wheel', (e) => {
+  target.addEventListener('wheel', (e) => {
     if (!frame.rotates || Math.abs(e.deltaX) <= Math.abs(e.deltaY)) return;
     e.preventDefault();
     stopSpin();
-    wheelRest += e.deltaX * lanesPerPx;
+    wheelRest += e.deltaX * lanesPerPx();
     const steps = Math.trunc(wheelRest);
     wheelRest -= steps;
     if (steps) turnTo(offset + steps);
   }, { passive: false });
+}
 
-  const canvas = $('full-canvas');
-  const aim = (e) => {
-    const box = canvas.getBoundingClientRect();
-    stopSpin();
-    turnTo(offsetAtPoint(e.clientX - box.left, box.width, frame));
-  };
-  canvas.addEventListener('pointerdown', (e) => { canvas.setPointerCapture(e.pointerId); aim(e); });
-  canvas.addEventListener('pointermove', (e) => { if (canvas.hasPointerCapture(e.pointerId)) aim(e); });
+function initRotation() {
+  let spinning = null;
+  const stopSpin = () => { if (spinning) cancelAnimationFrame(spinning); spinning = null; };
+  const setSpinning = (id) => { spinning = id; };
 
+  const body = $('log-body');
+  body.addEventListener('click', (e) => { if (e.target.dataset.to) select(e.target.dataset.to); });
+  addSpin(body, () => 1 / LANE_W, (e) => e.clientX - body.getBoundingClientRect().left <= graphWidth(frame.drawnLanes), stopSpin, setSpinning);
+  addSpin($('cone-canvas'), () => coneLanesPerPx(frame), () => true, stopSpin, setSpinning);
+
+  initConeZoom(queuePaint);
+  $('log-scroll').addEventListener('scroll', () => { if (isConeView()) queuePaint(); });
   $('spin').addEventListener('input', (e) => { stopSpin(); turnTo(Number(e.target.value)); });
   $('spin-left').addEventListener('click', () => { stopSpin(); turnTo(offset - (frame.lanes - 1)); });
   $('spin-right').addEventListener('click', () => { stopSpin(); turnTo(offset + (frame.lanes - 1)); });
@@ -555,11 +599,12 @@ async function start() {
   $('info-btn').addEventListener('click', () => $('info').showModal());
   for (const id of ['depth', 'parents', 'dead']) $(id).addEventListener('change', render);
   $('show-all').addEventListener('click', toggleShowAll);
-  $('graph-only').addEventListener('click', () => setGraphOnly(true));
-  $('graph-exit').addEventListener('click', () => setGraphOnly(false));
+  $('cone-open').addEventListener('click', () => setConeView(true));
+  $('cone-exit').addEventListener('click', () => setConeView(false));
+  $('cone-gaps').addEventListener('click', toggleGaps);
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape' || $('info').open) return;
-    if (document.body.classList.contains('graph-only')) setGraphOnly(false);
+    if (isConeView()) setConeView(false);
     else select(null);
   });
 

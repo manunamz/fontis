@@ -15,11 +15,11 @@ NOTE: pprhub is a proof-of-concept demo. It renders dated snapshots of two paper
 ## What's here
 
 - **Overview**: the whole measured tree at once, one dot per paper by depth and year, with dead ends in colour. Click a dot to open that paper in the graph.
-- **Rotate**: the graph has a maximum width, and its lanes sit on a loop. Drag or spin it, or use the slider. Every paper keeps its row, which fills when its lane comes into view, so nothing shifts vertically. The spine stays pinned, and a trace turns the graph to keep up.
-- **Graph only**: the entire graph fitted to one screen, with a band marking the window you're rotating. Drag to move it, and Esc returns to the table at that spot.
+- **Rotate**: the graph has a maximum width, and its lanes sit on a loop. Drag or spin it, or use the slider. The table lists the papers on the lanes in view, in graph order, and **fixed rows** gives every paper its own row instead, with gaps where its lane is out of view. The spine stays pinned, and a tail marks a link that leaves the view: hover it to see where it goes, or click it to go there.
+- **Cone**: the entire graph as a cone beside the table. The seed is the tip, the spine is the axle, and each of the seed's references holds a block of lanes around it. The table is the strip of the cone facing you, rolled flat, like the part of a tire touching the ground. Spin the cone and the table fills with that strip's papers, Scroll or pinch to zoom, and drag up or down to pan.
 - **Log**: the ancestry of *Attention Is All You Need* or Watson and Crick's 1953 DNA paper as a source-tree-style graph, newest first, with the seed's most cited line as a straight spine. Choose the depth and how many parents each paper shows.
 - **Expand**: `+n` on a row draws all of that paper's references, even past the depth limit if the snapshot has them. **Show all** does it for every paper.
-- **Trace**: select a paper to light up its line back to the seed and everything beneath it.
+- **Trace**: select a paper to light up its line back to the seed and everything beneath it. Its connections come into the table even if their lanes are out of view, and they stay as you turn.
 - **Dead ends**: references with no OpenAlex record, and papers with no recorded references, are marked where the trail stops. A line that fades out has more references beyond the view.
 - **Suspect links**: a paper dated more than two years after one citing it gets a dotted amber link, because that usually means a bad match or a wrong date.
 
@@ -59,10 +59,10 @@ An ID counts as dead only if the single-work route returns 404. Batch queries si
 
 1. **`select`** walks from the seed, following each paper's top references to the chosen depth.
 2. **`order`** sorts children above parents, newest first where that's possible. Years alone can't do it, because citations sometimes point forward in time. An edge that closes a citation cycle is cut and reported in the footer, since a commit graph can't draw one.
-3. **`layout`** assigns lanes the way SourceTree does: a paper lands on the leftmost lane waiting for it, its most cited parent continues that lane, and other parents open new lanes or join one already waiting. Lane 0 is reserved for the seed's first-parent line.
+3. **`layout`** assigns lanes the way SourceTree does: a paper lands on the leftmost lane waiting for it, its most cited parent continues that lane, and other parents open new lanes or join one already waiting. Lane 0 is reserved for the seed's first-parent line. For the cone, every other lane belongs to one sector, the line of descent from one of the seed's references, so neighbouring lanes are related.
 4. **`windowView`** rotates the graph: it keeps the spine plus a window of lanes on a loop, fills only the rows of papers on those lanes, and turns links leaving the window into short tails.
 
-`public/js/graph.js` draws the result as SVG, and `public/js/app.js` is the rest of the page.
+`public/js/graph.js` draws the result as SVG, `public/js/cone.js` draws the whole layout as a cone on canvas, and `public/js/app.js` is the rest of the page.
 
 ## Development
 

@@ -1,7 +1,7 @@
 'use strict';
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { select, order, layout, lineage, frontier, hiddenCount, hiddenParents, windowView, offsetFor } = require('../../public/lib/lineage');
+const { select, order, layout, lineage, connections, frontier, hiddenCount, hiddenParents, windowView, compactRows, offsetFor } = require('../../public/lib/lineage');
 
 const paper = (id, year, cited, parents = [], dead = []) => ({ id, title: id, year, cited, parents, dead });
 
@@ -276,7 +276,7 @@ test('links leaving the window become one merged tail per row and direction', ()
   const seedRow = win.rows.find((r) => r.id === 'seed').row;
   const tails = win.stubs.filter((s) => s.row === seedRow);
   assert.ok(tails.length >= 1 && tails.length <= 2);
-  assert.equal(tails.reduce((sum, s) => sum + s.count, 0), 6);
+  assert.equal(tails.reduce((sum, s) => sum + s.links.length, 0), 6);
 });
 
 test('every drawn edge in a window has both ends on rows in view', () => {
@@ -292,4 +292,85 @@ test('offsetFor brings a lane into the window', () => {
   const target = out.rows.find((r) => r.id === 'p8');
   const offset = offsetFor(target.lane, { width: 3, sideLanes: out.lanes - 1 });
   assert.ok(windowView(out, { offset, width: 3 }).rows.some((r) => r.id === 'p8'));
+});
+
+test('layout gives each of the seed\'s references one sector of neighbouring lanes', () => {
+  const nodes = {
+    S: { id: 'S', year: 2020, cited: 9 },
+    A: { id: 'A', year: 2019, cited: 5 },
+    B: { id: 'B', year: 2019, cited: 4 },
+    A1: { id: 'A1', year: 2010, cited: 3 },
+    A2: { id: 'A2', year: 2010, cited: 2 },
+    B1: { id: 'B1', year: 2010, cited: 3 },
+    B2: { id: 'B2', year: 2010, cited: 2 },
+    Z: { id: 'Z', year: 2000, cited: 1 },
+  };
+  const edges = [['S', 'A'], ['S', 'B'], ['A', 'A1'], ['A', 'A2'], ['B', 'B1'], ['B', 'B2'], ['A2', 'Z'], ['B2', 'Z']];
+  const ids = Object.keys(nodes);
+  const { rows, sectors, lanes } = layout(ids, edges, nodes, { grouped: true });
+
+  assert.deepEqual(sectors.map((s) => s.id), ['A', 'B']);
+  assert.equal(sectors[0].papers + sectors[1].papers, ids.length - 1);
+  assert.equal(sectors[1].first, sectors[0].last + 1);
+  assert.equal(sectors[1].last, lanes - 1);
+  for (const row of rows) {
+    if (row.id === 'S' || row.lane === 0) continue;
+    const { first, last } = sectors[row.sector];
+    assert.ok(row.lane >= first && row.lane <= last, `${row.id} sits in its sector`);
+  }
+});
+
+test('compactRows closes gaps between filled rows and keeps their order', () => {
+  const frame = {
+    rows: [{ id: 'a', row: 0, lane: 0 }, { id: 'b', row: 40, lane: 1 }, { id: 'c', row: 90, lane: 1 }],
+    edges: [{ child: 'a', parent: 'c', from: 0, to: 90 }],
+    stubs: [{ row: 40, lane: 1, dir: 1, color: 1, count: 1 }],
+    totalRows: 200,
+  };
+  const out = compactRows(frame);
+  assert.deepEqual(out.rows.map((r) => [r.id, r.row, r.from]), [['a', 0, 0], ['b', 1, 40], ['c', 2, 90]]);
+  assert.deepEqual([out.edges[0].from, out.edges[0].to], [0, 2]);
+  assert.equal(out.stubs[0].row, 1);
+  assert.equal(out.totalRows, 3);
+});
+
+test('connections gives the line to the seed, then neighbours up to the limit', () => {
+  const edges = [['S', 'A'], ['A', 'B'], ['B', 'C'], ['S', 'B'], ['C', 'D'], ['C', 'E']].map(([child, parent]) => ({ child, parent }));
+  assert.deepEqual([...connections('C', edges)], ['S', 'B', 'C', 'D', 'E']);
+  assert.deepEqual([...connections('C', edges, 4)], ['S', 'B', 'C', 'D']);
+  assert.deepEqual([...connections('S', edges, 1)], ['S']);
+});
+
+test('windowView keeps connected papers in view on extra lanes', () => {
+  const nodes = {};
+  const ids = ['S', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'A1'];
+  ids.forEach((id, i) => { nodes[id] = { id, year: 2020 - i, cited: 20 - i }; });
+  const edges = ids.slice(1, 9).map((id) => ['S', id]).concat([['H', 'A1']]);
+  const full = layout(ids, edges, nodes);
+  const target = full.rows.find((r) => r.id === 'A1');
+
+  const plain = windowView(full, { width: 2, offset: target.lane + 2 });
+  assert.ok(!plain.rows.some((r) => r.id === 'A1'));
+
+  const keep = connections('A1', full.edges);
+  const kept = windowView(full, { width: 2, offset: target.lane + 2, keep });
+  assert.ok(kept.rows.some((r) => r.id === 'A1'));
+  assert.ok(kept.drawnLanes > kept.lanes);
+  assert.ok(kept.edges.some((e) => e.child === 'H' && e.parent === 'A1'));
+  assert.equal(kept.lanes, plain.lanes);
+  assert.equal(new Set(kept.rows.map((r) => r.lane)).has(null), false);
+});
+
+test('windowView tails list the papers they lead to', () => {
+  const nodes = {};
+  const ids = ['S', 'A', 'B', 'C', 'D', 'E'];
+  ids.forEach((id, i) => { nodes[id] = { id, year: 2020 - i, cited: 20 - i }; });
+  const edges = ids.slice(1).map((id) => ['S', id]);
+  const full = layout(ids, edges, nodes);
+  const frame = windowView(full, { width: 2 });
+  const links = frame.stubs.flatMap((s) => s.links);
+  const hidden = ids.slice(1).filter((id) => !frame.rows.some((r) => r.id === id));
+  assert.ok(hidden.length > 0);
+  for (const id of hidden) assert.ok(links.some((l) => l.id === id && l.cites), `S links to ${id}`);
+  assert.ok(frame.stubs.every((s) => s.links.length > 0));
 });

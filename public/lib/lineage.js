@@ -16,6 +16,7 @@
   // A citation can outrun its target's date by a year or two (preprints, late
   // journal issues). Past that, the link or the date is likely wrong.
   const SUSPECT_YEARS = 2;
+  const CONNECTION_LIMIT = 12;
 
   function isSuspect(child, parent) {
     return child.year != null && parent.year != null && parent.year - child.year > SUSPECT_YEARS;
@@ -134,6 +135,36 @@
   }
 
   /*
+   * Split the ancestry into sectors, one per resolved reference of the seed,
+   * so every paper belongs to a single line of descent. Walking level by level,
+   * a paper shared by several sectors goes to the smallest of them, which keeps
+   * one heavily cited reference from swallowing the rest.
+   */
+  function assignSectors(seed, parentsOf, nodes) {
+    const roots = parentsOf.get(seed).filter((id) => !nodes[id].missing);
+    const sectorOf = new Map(roots.map((id, i) => [id, i]));
+    const sizes = roots.map(() => 1);
+    let level = roots;
+    while (level.length) {
+      const claims = new Map();
+      for (const id of level) {
+        for (const p of parentsOf.get(id)) {
+          if (p === seed || sectorOf.has(p)) continue;
+          if (!claims.has(p)) claims.set(p, []);
+          claims.get(p).push(sectorOf.get(id));
+        }
+      }
+      for (const [id, sectors] of claims) {
+        const smallest = sectors.reduce((a, b) => (sizes[b] < sizes[a] || (sizes[b] === sizes[a] && b < a) ? b : a));
+        sectorOf.set(id, smallest);
+        sizes[smallest]++;
+      }
+      level = [...claims.keys()];
+    }
+    return { roots, sectorOf };
+  }
+
+  /*
    * Assign lanes, SourceTree style. Walk the rows top to bottom keeping a list
    * of open lanes, each waiting for one parent. A paper lands on the leftmost
    * lane waiting for it; its most-cited parent continues that lane (the
@@ -144,13 +175,19 @@
    * Lane 0 belongs to the seed's first-parent line alone, so the graph has one
    * straight spine, even where another paper reached a spine paper first.
    *
-   * Returns { rows: [{ id, row, lane, color }], edges, lanes, cut } where each
+   * With `grouped`, every other lane belongs to one sector and sectors sit side
+   * by side, so neighbouring lanes share a line of descent. That costs width, so
+   * it's for views that wrap the lanes around. A paper's sector is reported on
+   * its row, and `sectors` lists each one's root paper and, when grouped, span
+   * of lanes.
+   *
+   * Returns { rows: [{ id, row, lane, color, sector }], edges, lanes, sectors, cut } where each
    * edge is { child, parent, from, to, fromLane, via, toLane, color, join } in
    * row/lane coordinates: leave `from`, run down lane `via`, arrive at `to`.
    * `join` marks an edge that merged into a lane already open, and `suspect`
    * one whose parent is dated well after its child.
    */
-  function layout(ids, allEdges, nodes) {
+  function layout(ids, allEdges, nodes, { grouped = false } = {}) {
     const { rows, edges, cut } = order(ids, allEdges, nodes);
     const rowOf = new Map(rows.map((id, i) => [id, i]));
     const parentsOf = new Map(ids.map((id) => [id, []]));
@@ -166,11 +203,17 @@
       if (next) spineNext.set(id, next);
     }
 
+    const { roots, sectorOf } = assignSectors(rows[0], parentsOf, nodes);
+    const sectorFor = (id) => sectorOf.get(id) ?? 0;
+    const groupFor = grouped ? sectorFor : () => 0;
+
     const lanes = [{ wants: rows[0], color: 0 }]; // lane index -> { wants: id, color } | null
+    const laneSector = [null];
     let nextColor = 1;
     const openLane = (wants, color) => {
-      let i = lanes.indexOf(null, 1);
-      if (i === -1) { i = lanes.length; lanes.push(null); }
+      const group = groupFor(wants);
+      let i = lanes.findIndex((l, at) => at > 0 && l === null && laneSector[at] === group);
+      if (i === -1) { i = lanes.length; lanes.push(null); laneSector.push(group); }
       lanes[i] = { wants, color };
       return i;
     };
@@ -178,8 +221,6 @@
     const placed = [];
     const paths = [];
     const arrivals = new Map(); // parent id -> paths still running toward it
-    let width = 0;
-
     rows.forEach((id, row) => {
       const waiting = [];
       lanes.forEach((l, i) => { if (l && l.wants === id) waiting.push(i); });
@@ -189,7 +230,7 @@
       lanes[lane] = null;
       for (const p of arrivals.get(id) || []) p.toLane = lane;
 
-      placed.push({ id, row, lane, color });
+      placed.push({ id, row, lane, color, sector: sectorFor(id) });
 
       parentsOf.get(id).forEach((pid, i) => {
         let via = lanes.findIndex((l) => l && l.wants === pid);
@@ -202,7 +243,7 @@
         } else if (via !== -1) {
           edgeColor = lanes[via].color;
           join = true;
-        } else if (i === 0 && lane !== 0 && lanes[lane] === null) {
+        } else if (i === 0 && lane !== 0 && lanes[lane] === null && groupFor(pid) === laneSector[lane]) {
           via = lane;
           edgeColor = color;
           lanes[lane] = { wants: pid, color };
@@ -215,10 +256,23 @@
         if (!arrivals.has(pid)) arrivals.set(pid, []);
         arrivals.get(pid).push(path);
       });
-      width = Math.max(width, lanes.length);
     });
 
-    return { rows: placed, edges: paths, lanes: width, cut };
+    // Lanes were numbered as they opened; lay them out sector by sector.
+    const sorted = lanes.map((_, i) => i).slice(1).sort((a, b) => laneSector[a] - laneSector[b] || a - b);
+    const lanePosition = new Map([[0, 0], ...sorted.map((lane, i) => [lane, i + 1])]);
+    for (const row of placed) row.lane = lanePosition.get(row.lane);
+    for (const path of paths) {
+      path.fromLane = lanePosition.get(path.fromLane);
+      path.via = lanePosition.get(path.via);
+      path.toLane = lanePosition.get(path.toLane);
+    }
+    const sectors = roots.map((id, sector) => {
+      const held = grouped ? sorted.filter((lane) => laneSector[lane] === sector).map((lane) => lanePosition.get(lane)) : [];
+      return { id, sector, first: held[0] ?? null, last: held[held.length - 1] ?? null, papers: placed.filter((r) => r.sector === sector && sectorOf.has(r.id)).length };
+    });
+
+    return { rows: placed, edges: paths, lanes: lanes.length, sectors, cut };
   }
 
   // Everything reachable from `id` in both directions, for tracing one
@@ -243,6 +297,38 @@
       return seen;
     };
     return new Set([id, ...walk(id, up), ...walk(id, down)]);
+  }
+
+  /*
+   * What to show alongside a selected paper: its shortest line back to the
+   * seed, then the papers citing it and the papers it cites, up to `limit`.
+   */
+  function connections(id, edges, limit = CONNECTION_LIMIT) {
+    const citers = new Map();
+    const cited = new Map();
+    for (const e of edges) {
+      if (!citers.has(e.parent)) citers.set(e.parent, []);
+      citers.get(e.parent).push(e.child);
+      if (!cited.has(e.child)) cited.set(e.child, []);
+      cited.get(e.child).push(e.parent);
+    }
+    const via = new Map([[id, null]]);
+    const queue = [id];
+    let root = id;
+    for (let i = 0; i < queue.length; i++) {
+      const next = citers.get(queue[i]) || [];
+      if (!next.length) { root = queue[i]; break; }
+      for (const child of next) {
+        if (!via.has(child)) { via.set(child, queue[i]); queue.push(child); }
+      }
+    }
+    const keep = new Set();
+    for (let at = root; at; at = via.get(at)) keep.add(at);
+    for (const near of [...(citers.get(id) || []), ...(cited.get(id) || [])]) {
+      if (keep.size >= limit) break;
+      keep.add(near);
+    }
+    return keep;
   }
 
   // Rows whose lineage carries on past the view: resolved references exist, but
@@ -270,52 +356,86 @@
   /*
    * Rotate the graph: a fixed window of side lanes on a loop, so turning either
    * way brings the far side around. The spine stays pinned. Every paper keeps
-   * its row: turning only fills or empties rows, so nothing shifts vertically.
+   * its row: turning only fills or empties rows, and `compactRows` can close
+   * the gaps.
    * A link leaving the window becomes a tail, merged per row and direction, at
-   * whichever of its ends is in view.
+   * whichever of its ends is in view. Each tail lists the papers it leads to.
    *
-   * Returns { rows, edges, stubs, lanes, offset, sideLanes, rotates, totalRows }.
+   * Papers in `keep` stay in view however it's turned, on extra lanes past the
+   * window: `lanes` counts the window and spine, `drawnLanes` the extras too.
+   *
+   * Returns { rows, edges, stubs, lanes, drawnLanes, kept, offset, sideLanes, rotates, totalRows }.
    * Rows keep their `layout` numbers; lanes are renumbered for the window.
    */
-  function windowView(layout, { offset = 0, width = 12 } = {}) {
+  function windowView(layout, { offset = 0, width = 12, keep = new Set() } = {}) {
     const sideLanes = layout.lanes - 1;
     if (sideLanes <= width) {
-      return { rows: layout.rows, edges: layout.edges, stubs: [], lanes: layout.lanes, offset: 0, sideLanes, rotates: false, totalRows: layout.rows.length };
+      return { rows: layout.rows, edges: layout.edges, stubs: [], lanes: layout.lanes, drawnLanes: layout.lanes, kept: new Set(), offset: 0, sideLanes, rotates: false, totalRows: layout.rows.length };
     }
     const turned = ((offset % sideLanes) + sideLanes) % sideLanes;
     const place = (lane) => (lane - 1 - turned + sideLanes) % sideLanes;
+    const inWindow = (lane) => lane === 0 || place(lane) < width;
+
+    const extraLanes = new Set();
+    for (const row of layout.rows) if (keep.has(row.id) && !inWindow(row.lane)) extraLanes.add(row.lane);
+    for (const e of layout.edges) {
+      if (!keep.has(e.child) || !keep.has(e.parent)) continue;
+      for (const lane of [e.fromLane, e.via, e.toLane]) if (!inWindow(lane)) extraLanes.add(lane);
+    }
+    const extra = new Map([...extraLanes].sort((a, b) => a - b).map((lane, i) => [lane, width + 1 + i]));
+
     const visible = (lane) => {
       if (lane === 0) return 0;
-      const at = place(lane);
-      return at < width ? at + 1 : null;
+      if (inWindow(lane)) return place(lane) + 1;
+      return extra.get(lane) ?? null;
     };
     // Which way round is shorter to reach a lane that's out of view.
     const towards = (lane) => (place(lane) - width < sideLanes - place(lane) ? 1 : -1);
 
     const rows = [];
+    const shown = new Set();
+    const kept = new Set();
     for (const row of layout.rows) {
-      const lane = visible(row.lane);
-      if (lane !== null) rows.push({ ...row, lane });
+      if (keep.has(row.id)) kept.add(row.row);
+      if (!inWindow(row.lane) && !keep.has(row.id)) continue;
+      rows.push({ ...row, lane: visible(row.lane) });
+      shown.add(row.id);
     }
 
     const edges = [];
     const stubs = new Map();
-    const addStub = (row, lane, dir, color) => {
+    const addStub = (row, lane, dir, color, link) => {
       const key = `${row}:${dir}`;
-      if (stubs.has(key)) stubs.get(key).count++;
-      else stubs.set(key, { row, lane, dir, color, count: 1 });
+      if (!stubs.has(key)) stubs.set(key, { row, lane, dir, color, links: [] });
+      stubs.get(key).links.push(link);
     };
     for (const e of layout.edges) {
       const [from, via, to] = [visible(e.fromLane), visible(e.via), visible(e.toLane)];
-      if (from !== null && via !== null && to !== null) {
+      const [showsChild, showsParent] = [shown.has(e.child), shown.has(e.parent)];
+      if (showsChild && showsParent && via !== null) {
         edges.push({ ...e, fromLane: from, via, toLane: to });
         continue;
       }
-      const away = [e.via, e.toLane, e.fromLane].find((lane) => visible(lane) === null);
-      if (from !== null) addStub(e.from, from, towards(away), e.color);
-      if (to !== null) addStub(e.to, to, towards(away), e.color);
+      const away = [e.via, e.toLane, e.fromLane].find((lane) => visible(lane) === null) ?? e.toLane;
+      if (showsChild) addStub(e.from, from, towards(away), e.color, { id: e.parent, cites: true });
+      if (showsParent) addStub(e.to, to, towards(away), e.color, { id: e.child, cites: false });
     }
-    return { rows, edges, stubs: [...stubs.values()], lanes: width + 1, offset: turned, sideLanes, rotates: true, totalRows: layout.rows.length };
+    return { rows, edges, stubs: [...stubs.values()], lanes: width + 1, drawnLanes: width + 1 + extra.size, kept, offset: turned, sideLanes, rotates: true, totalRows: layout.rows.length };
+  }
+
+  /*
+   * Close the gaps between a window's filled rows. Rows keep their order, and
+   * `from` on each row remembers its place in the full layout.
+   */
+  function compactRows(frame) {
+    const position = new Map(frame.rows.map((row, i) => [row.row, i]));
+    return {
+      ...frame,
+      rows: frame.rows.map((row, i) => ({ ...row, row: i, from: row.row })),
+      edges: frame.edges.map((e) => ({ ...e, from: position.get(e.from), to: position.get(e.to) })),
+      stubs: frame.stubs.map((stub) => ({ ...stub, row: position.get(stub.row) })),
+      totalRows: frame.rows.length,
+    };
   }
 
   // The rotation that centres a lane in the window.
@@ -336,5 +456,5 @@
     return Math.max(0, measured - shown.size);
   }
 
-  return { select, order, layout, lineage, rankParents, frontier, hiddenCount, hiddenParents, isSuspect, windowView, offsetFor };
+  return { select, order, layout, lineage, connections, rankParents, frontier, hiddenCount, hiddenParents, isSuspect, windowView, compactRows, offsetFor };
 });

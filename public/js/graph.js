@@ -10,6 +10,7 @@ const SIDE_COLORS = 4;
 const FADE_LENGTH = 20;
 const STUB_REACH = 14;
 const STUB_DROP = 9;
+const STUB_NAMES = 4; // papers named on a tail
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
 const laneX = (lane) => GRAPH_PAD + lane * LANE_W;
@@ -84,6 +85,19 @@ function fadeStub(row) {
   return stub;
 }
 
+// A tail is too thin to aim at, so an invisible wider line takes the pointer.
+function stubHit(stub, nodes) {
+  const hit = svgEl('path', { d: stubPath(stub), class: 'stub-hit' });
+  hit.dataset.to = stub.links[0].id;
+  const label = ({ id, cites }) => `${cites ? 'cites' : 'cited by'}: ${nodes[id].missing ? 'references not found' : nodes[id].title}`;
+  const shown = stub.links.slice(0, STUB_NAMES).map(label);
+  if (stub.links.length > STUB_NAMES) shown.push(`+${stub.links.length - STUB_NAMES} more`);
+  const title = svgEl('title', {});
+  title.textContent = [...shown, 'click to go to the first'].join('\n');
+  hit.appendChild(title);
+  return hit;
+}
+
 // A tail for links that leave the window, leaning the way they went.
 function stubPath(stub) {
   const x = laneX(stub.lane);
@@ -94,7 +108,7 @@ function stubPath(stub) {
 function drawGraph(layout, nodes, seed, frontier) {
   const svg = svgEl('svg', {
     class: 'graph',
-    width: graphWidth(layout.lanes),
+    width: graphWidth(layout.drawnLanes),
     height: layout.totalRows * ROW_H,
     'aria-hidden': 'true',
   });
@@ -111,6 +125,7 @@ function drawGraph(layout, nodes, seed, frontier) {
   }
   for (const stub of layout.stubs) {
     svg.appendChild(svgEl('path', { d: stubPath(stub), class: `stub lane-${colorIndex(stub.color)}` }));
+    svg.appendChild(stubHit(stub, nodes));
   }
   for (const row of layout.rows) if (frontier.has(row.id)) svg.appendChild(fadeStub(row));
   for (const row of layout.rows) {
