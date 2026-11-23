@@ -11,6 +11,7 @@ const MIN_QUERY = 3;
 const MAX_AUTHORS = 3;
 const AUTHOR_PAPERS = 10;
 const CRAWL_DEPTH = 3;
+const ETA_AFTER_MS = 4000; // long enough for a steady rate
 const CRAWL_CACHE = 'fontis-crawls';
 const INTRO_KEY = 'fontis-intro-dismissed';
 
@@ -147,6 +148,13 @@ function showHome() {
   $('search').focus();
 }
 
+function timeLeft(ms) {
+  if (ms < 60000) return 'under a minute left at this depth';
+  const minutes = Math.round(ms / 60000);
+  if (minutes < 60) return `about ${minutes} min left at this depth`;
+  return `about ${Math.round(minutes / 6) / 10} hours left at this depth`;
+}
+
 async function savedCrawl(id) {
   try {
     const hit = await (await caches.open(CRAWL_CACHE)).match(`crawl-${id}`);
@@ -176,7 +184,18 @@ async function crawlPaper(id) {
   let fetched = 0;
   let total = 0;
   let level = 0;
-  const showCount = () => status(`Depth ${level} of ${CRAWL_DEPTH}: ${fetched.toLocaleString()} of ${total.toLocaleString()} references`);
+  let timed = { at: 0, fetched: 0 }; // where the current rate is measured from
+  const restartTimer = () => { timed = { at: performance.now(), fetched }; };
+  const showCount = () => {
+    const done = Math.min(fetched, total); // a merged paper is remembered twice
+    $('crawl-progress').hidden = false;
+    $('crawl-progress').max = total;
+    $('crawl-progress').value = done;
+    const elapsed = performance.now() - timed.at;
+    const read = fetched - timed.fetched;
+    const eta = elapsed > ETA_AFTER_MS && read > 0 && done < total ? ` · ${timeLeft((total - done) * elapsed / read)}` : '';
+    status(`Depth ${level} of ${CRAWL_DEPTH}: ${done.toLocaleString()} of ${total.toLocaleString()} references${eta}`);
+  };
 
   $('crawl-stop').addEventListener('click', () => { stopped = true; status('Stopping…'); });
   const get = async (url) => {
@@ -187,11 +206,12 @@ async function crawlPaper(id) {
   try {
     finished = await Crawl.crawl(id, CRAWL_DEPTH, get, {
       remember: () => { fetched++; if (!stopped) showCount(); },
-      onSpent: () => { $('crawl-note').textContent = 'Today\'s free OpenAlex budget is spent, so this has slowed to about 4 papers a second. Stop whenever you like and see the levels that finished.'; },
+      onSpent: () => { restartTimer(); $('crawl-spent').hidden = false; },
       onDepth: (d, count) => {
         level = d;
         fetched = 0;
         total = count;
+        restartTimer();
         showCount();
         if (d === 1) $('crawl-title').textContent = 'Following the references…';
       },
@@ -205,7 +225,7 @@ async function crawlPaper(id) {
     if (!finished) {
       const missing = e.message.startsWith('no such work');
       status(e.stopped ? 'Stopped.' : missing ? 'OpenAlex has no paper with that ID.' : 'Could not reach OpenAlex.');
-      $('crawl-note').hidden = true;
+      for (const part of ['crawl-note', 'crawl-spent', 'crawl-progress']) $(part).hidden = true;
       return null;
     }
   }
@@ -213,7 +233,7 @@ async function crawlPaper(id) {
   if (!finished.levels.length) {
     $('crawl-title').textContent = finished.works.get(finished.seed).title;
     status('OpenAlex has no references on record for this paper, so its trail stops here.');
-    $('crawl-note').hidden = true;
+    for (const part of ['crawl-note', 'crawl-spent', 'crawl-progress']) $(part).hidden = true;
     return null;
   }
 

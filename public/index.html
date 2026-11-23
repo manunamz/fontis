@@ -31,7 +31,9 @@
   <section class="home" id="crawl" aria-live="polite" hidden>
     <h1 id="crawl-title">Finding the paper…</h1>
     <p id="crawl-status"></p>
-    <p class="crawl-note" id="crawl-note">This runs in your tab, so keep it open.</p>
+    <progress id="crawl-progress" aria-label="references read at this depth" hidden></progress>
+    <p class="crawl-note" id="crawl-note">There's no snapshot of this paper yet, so your browser is building one live from OpenAlex, a free citation database. It looks up every reference, then every reference's references, three levels deep. That can be thousands of papers, so it can take several minutes. Keep this tab open. You can stop after any level and see what's been found so far.</p>
+    <p class="crawl-note" id="crawl-spent" hidden>Today's free OpenAlex budget for your connection is spent, so this has slowed to about 4 papers a second.</p>
     <button class="ghost text" id="crawl-stop" type="button" hidden>stop</button>
     <p><a href="./">Back to search</a></p>
   </section>
