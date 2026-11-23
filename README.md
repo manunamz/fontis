@@ -15,9 +15,7 @@
 > Where did that theory come from?
 
 <p align="center">
-  <video src="./docs/demo.mp4" controls width="100%"></video>
-  <br/>
-  <a href="./docs/demo.mp4">▶ Watch the demo (30 sec)</a>
+  <img src="./docs/demo.webp" width="100%" alt="Demo: searching for Attention Is All You Need, tracing and expanding its citation graph, then turning the full tree"/>
 </p>
 
 A paper is supposed to be a record of how we reached some state of knowledge. It follows from the observations and papers before it, and with luck it becomes a building block for later work. Ideally, following its citations as far as they go would end in hard evidence: something we can check with our senses, or logically with a proof. Often it doesn't. Trails stop at assumptions, or at citations that lead nowhere.
