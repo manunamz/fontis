@@ -180,6 +180,7 @@ async function crawlPaper(id) {
   $('crawl').hidden = false;
   const status = (text) => { $('crawl-status').textContent = text; };
   let stopped = false;
+  let complete = false;
   let finished = null; // the crawl as of the last full level
   let fetched = 0;
   let total = 0;
@@ -221,6 +222,7 @@ async function crawlPaper(id) {
         $('crawl-stop').textContent = `stop at depth ${d}`;
       },
     });
+    complete = true;
   } catch (e) {
     if (!finished) {
       const missing = e.message.startsWith('no such work');
@@ -238,7 +240,7 @@ async function crawlPaper(id) {
   }
 
   const files = Crawl.shape(finished, finished.levels.length);
-  if (!stopped) await saveCrawl(id, files);
+  if (complete) await saveCrawl(id, files);
   document.body.classList.remove('landing');
   $('crawl').hidden = true;
   return files;
