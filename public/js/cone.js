@@ -5,12 +5,13 @@
  */
 'use strict';
 
-const CONE_TILT = 0.3;
-const CONE_DEPTH = 0.3; // how much nearer the front is drawn than the back
 const CONE_PAD = 26;
 const BACK_ALPHA = 0.1;
 const FRONT_ALPHA = 0.3;
 const TREAD_STEPS = 8; // line segments per sector of the rim
+const RING = 7; // px around a selected paper
+const SELECTED_DOT = 3.5; // px
+const SELECTED_GLOW = 8; // px
 const SIGHT_REACH = 7; // px the marker for the rows in view overhangs the strip
 const TAU = Math.PI * 2;
 const MAX_ZOOM = 16;
@@ -19,8 +20,22 @@ const WHEEL_ZOOM = 0.002; // per pixel scrolled
 const PINCH_ZOOM = 0.01; // per pixel pinched, which reports far smaller deltas
 const DOTS_FROM_ZOOM = 2; // from here on, the front's papers are drawn too
 const MAX_CLARITY = 2; // how far zooming in can brighten the lines
+const SETTLE_MS = 140; // after this long still, the sharp view is drawn
+const STILL_LINKS = 40000; // links in the sharp view: past this the cone is a blur anyway
+const BATCH_LINKS = 5000; // sharp links drawn per frame, so input never waits long
+const QUICK_TREE = 12000; // links few enough to draw sharp in one go
+const TRACE_DIM = 0.3; // the rest of the cone, while a paper's line is traced
+const TRACE_ALPHA = [0.35, 0.9]; // a traced line on the back, then the front
+const TRACE_LINKS = 12000; // traced links drawn when still
+const TRACE_MOVING = 3000; // and while moving
+
+const { CONE_TILT, MAX_LINKS, conePoint, project, adjustDetail, linksInView } = Projection;
 
 let cone = null;
+let spinLinks = MAX_LINKS; // links drawn per frame while moving, tuned to the machine
+let lastMove = 0;
+let sharpRun = 0; // a newer draw abandons a sharp view still being built
+const sharp = document.createElement('canvas'); // where it's built, out of sight
 const lens = { zoom: 1, x: 0, y: 0 };
 
 const sectorStyle = (sector) => `--lane-${1 + sector % SIDE_COLORS}`;
@@ -31,6 +46,20 @@ function edgeStyle(e, rows, nodes) {
   if (e.fromLane === 0 && e.toLane === 0) return '--lane-0';
   const [child, parent] = [rows[e.from], rows[e.to]];
   return child.sector === parent.sector || child.lane === 0 ? sectorStyle(parent.sector) : '--edge-quiet';
+}
+
+// Links grouped by style, each with room for the ones in view.
+function linkGroups(edges, rows, nodes) {
+  const lists = new Map();
+  for (const e of edges) {
+    const style = edgeStyle(e, rows, nodes);
+    if (!lists.has(style)) lists.set(style, []);
+    lists.get(style).push(e.from, e.to);
+  }
+  return [...lists].map(([style, pairs]) => {
+    const all = Int32Array.from(pairs);
+    return { style, all, seen: new Int32Array(all.length), length: 0 };
+  });
 }
 
 function buildCone(layout, nodes) {
@@ -44,13 +73,10 @@ function buildCone(layout, nodes) {
     drop[row.row] = row.row / Math.max(count - 1, 1);
     lane[row.row] = row.lane;
   }
-  const groups = new Map();
-  for (const e of layout.edges) {
-    const style = edgeStyle(e, layout.rows, nodes);
-    if (!groups.has(style)) groups.set(style, []);
-    groups.get(style).push(e.from, e.to);
-  }
-  return { layout, angle, drop, lane, groups, side };
+  const groups = linkGroups(layout.edges, layout.rows, nodes);
+  const spine = Int32Array.from(layout.rows.filter((row) => row.lane === 0), (row) => row.row);
+  const buffers = { xs: new Float32Array(count), ys: new Float32Array(count), nears: new Float32Array(count) };
+  return { layout, angle, drop, groups, spine, side, ...buffers, lit: new Uint8Array(count), trail: null, traced: [] };
 }
 
 function coneShape(width, height) {
@@ -58,19 +84,6 @@ function coneShape(width, height) {
   const radius = Math.min(width / 2 - CONE_PAD, tall * 0.55);
   const length = tall - radius * Math.sin(CONE_TILT) * 2;
   return { radius, length, cx: width / 2, top: CONE_PAD };
-}
-
-// Screen position of a point on the cone, plus how far towards you it is (-1 to 1).
-function conePoint(shape, theta, drop) {
-  const { radius, length, cx, top } = shape;
-  const x = Math.sin(theta) * drop;
-  const near = Math.cos(theta) * drop;
-  const scale = 1 + near * CONE_DEPTH;
-  return {
-    x: cx + x * radius * scale,
-    y: top + drop * length * Math.cos(CONE_TILT) + near * radius * Math.sin(CONE_TILT),
-    near,
-  };
 }
 
 // Keep the canvas covered, so the cone can't be dragged off it.
@@ -90,15 +103,39 @@ function zoomAt(zoom, x, y) {
   $('cone-zoom-reset').textContent = `${Math.round(next * 100)}%`;
 }
 
-function strokeEdges(ctx, pairs, xs, ys, keep) {
+// Every `step`th of a group's links on one side of the cone, `front` or the back.
+function strokeLayer(ctx, group, front, step, from = 0, to = group.length / 2) {
+  const { xs, ys, nears } = cone;
+  const pairs = group.seen;
   ctx.beginPath();
-  for (let i = 0; i < pairs.length; i += 2) {
+  for (let k = from; k < to; k += step) {
+    const i = Math.floor(k) * 2;
     const [a, b] = [pairs[i], pairs[i + 1]];
-    if (!keep(a, b)) continue;
+    if (nears[a] + nears[b] >= 0 !== front) continue;
     ctx.moveTo(xs[a], ys[a]);
     ctx.lineTo(xs[b], ys[b]);
   }
   ctx.stroke();
+}
+
+// The links in the table's strip, drawn bright over the rest.
+function strokeStrip(ctx, frame, nodes) {
+  const { xs, ys } = cone;
+  const byStyle = new Map();
+  for (const e of frame.edges) {
+    const style = edgeStyle(e, cone.layout.rows, nodes);
+    if (!byStyle.has(style)) byStyle.set(style, []);
+    byStyle.get(style).push(e);
+  }
+  for (const [style, edges] of byStyle) {
+    ctx.strokeStyle = cssVar(style);
+    ctx.beginPath();
+    for (const { from, to } of edges) {
+      ctx.moveTo(xs[from], ys[from]);
+      ctx.lineTo(xs[to], ys[to]);
+    }
+    ctx.stroke();
+  }
 }
 
 function drawTread(ctx, shape, layout, spin) {
@@ -145,67 +182,188 @@ function drawStrip(ctx, shape, frame, spin, seen) {
   ctx.strokeRect(Math.min(top.x, bottom.x) - reach, top.y, Math.abs(bottom.x - top.x) + reach * 2, Math.max(bottom.y - top.y, 2 / lens.zoom));
 }
 
-function drawCone(layout, nodes, frame, turn, seen) {
+// Rings around the selected paper and the one it was reached from.
+function drawRings(ctx, xs, ys, rings) {
+  ctx.strokeStyle = cssVar('--accent');
+  for (const { row, strong } of rings) {
+    ctx.lineWidth = (strong ? 2 : 1) / lens.zoom;
+    ctx.beginPath();
+    ctx.arc(xs[row], ys[row], (strong ? RING : RING * 0.7) / lens.zoom, 0, TAU);
+    ctx.stroke();
+    if (!strong) continue;
+    ctx.save();
+    ctx.fillStyle = ctx.shadowColor = cssVar('--accent');
+    ctx.shadowBlur = SELECTED_GLOW;
+    ctx.beginPath();
+    ctx.arc(xs[row], ys[row], SELECTED_DOT / lens.zoom, 0, TAU);
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+// Point a canvas's drawing at the page, zoomed and panned.
+function aimContext(ctx, scale) {
+  ctx.setTransform(scale, 0, 0, scale, 0, 0);
+  ctx.translate(lens.x, lens.y);
+  ctx.scale(lens.zoom, lens.zoom);
+}
+
+function fitCanvas(canvas, width, height, scale) {
+  if (canvas.width === Math.round(width * scale) && canvas.height === Math.round(height * scale)) {
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalAlpha = 1;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+  } else {
+    canvas.width = Math.round(width * scale);
+    canvas.height = Math.round(height * scale);
+  }
+}
+
+// Lines stay thin as they spread apart, so they can afford to brighten.
+const lineLayers = () => {
+  const clarity = Math.min(MAX_CLARITY, Math.sqrt(lens.zoom));
+  const dim = cone.trail ? TRACE_DIM : 1;
+  return [[BACK_ALPHA * dim, false], [FRONT_ALPHA * clarity * dim, true]];
+};
+
+// The links of the traced line, as the 2D graph lights them: both ends on it.
+function traceLinks(trail, nodes) {
+  if (cone.trail === trail) return;
+  cone.trail = trail;
+  if (!trail) { cone.traced = []; return; }
+  const { rows, edges } = cone.layout;
+  cone.traced = linkGroups(edges.filter((e) => trail.has(e.child) && trail.has(e.parent)), rows, nodes);
+}
+
+// The traced line over the dimmed cone, a spread of it if it's big.
+function strokeTrace(ctx, moving) {
+  const links = cone.traced.reduce((sum, group) => sum + group.length / 2, 0);
+  const step = Math.max(1, links / (moving ? TRACE_MOVING : TRACE_LINKS));
+  ctx.lineWidth = 1 / lens.zoom;
+  TRACE_ALPHA.forEach((alpha, side) => {
+    ctx.globalAlpha = Math.min(1, alpha * Math.sqrt(step));
+    for (const group of cone.traced) {
+      ctx.strokeStyle = cssVar(group.style);
+      strokeLayer(ctx, group, side === 1, step);
+    }
+  });
+  ctx.globalAlpha = 1;
+}
+
+// Everything drawn over the links.
+function drawOverlay(ctx, shape, frame, spin, seen, rings, nodes, moving) {
+  const { xs, ys, nears, lit } = cone;
+  strokeTrace(ctx, moving);
+  ctx.globalAlpha = 1;
+  drawTread(ctx, shape, cone.layout, spin);
+  ctx.lineWidth = 1.2 / lens.zoom;
+  strokeStrip(ctx, frame, nodes);
+  ctx.fillStyle = cssVar('--fg');
+  const dot = 2.5 / lens.zoom;
+  if (lens.zoom >= DOTS_FROM_ZOOM) {
+    for (let i = 0; i < lit.length; i++) {
+      if (!lit[i] && nears[i] >= 0) ctx.fillRect(xs[i] - dot / 4, ys[i] - dot / 4, dot / 2, dot / 2);
+    }
+  }
+  for (const { row } of frame.rows) ctx.fillRect(xs[row] - dot / 2, ys[row] - dot / 2, dot, dot);
+  if (frame.rotates) drawStrip(ctx, shape, frame, spin, seen);
+  drawRings(ctx, xs, ys, rings);
+}
+
+// Build the sharp view a batch per frame, then show it. Most of a line's cost
+// comes when the browser paints it, so one big draw would hold up all input.
+function buildSharp(ctx, canvas, scale, width, height, step, finish) {
+  const run = ++sharpRun;
+  fitCanvas(sharp, width, height, scale);
+  const back = sharp.getContext('2d');
+  aimContext(back, scale);
+  back.lineWidth = 0.6 / lens.zoom;
+  const batches = [];
+  for (const [alpha, front] of lineLayers()) {
+    for (const group of cone.groups) {
+      const links = group.length / 2;
+      for (let from = 0; from < links; from += BATCH_LINKS * step) {
+        batches.push({ alpha, front, group, from, to: Math.min(links, from + BATCH_LINKS * step) });
+      }
+    }
+  }
+  const next = () => {
+    if (run !== sharpRun) return;
+    const batch = batches.shift();
+    if (!batch) {
+      fitCanvas(canvas, width, height, scale);
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.drawImage(sharp, 0, 0);
+      aimContext(ctx, scale);
+      finish();
+      return;
+    }
+    back.globalAlpha = batch.alpha;
+    back.strokeStyle = cssVar(batch.group.style);
+    strokeLayer(back, batch.group, batch.front, step, batch.from, batch.to);
+    requestAnimationFrame(next);
+  };
+  requestAnimationFrame(next);
+}
+
+// `moving` trades detail for speed: a big tree draws a spread of its links,
+// brightened to keep its weight, on a canvas with a quarter of the pixels.
+function drawCone(layout, nodes, frame, turn, seen, rings, trail, moving = false) {
   if (cone?.layout !== layout) cone = buildCone(layout, nodes);
+  traceLinks(trail, nodes);
   const canvas = $('cone-canvas');
   const box = canvas.parentElement;
   const width = box.clientWidth;
   const height = box.clientHeight;
-  const scale = window.devicePixelRatio || 1;
-  canvas.width = width * scale;
-  canvas.height = height * scale;
+  const big = layout.edges.length > QUICK_TREE;
+  const pixels = window.devicePixelRatio || 1;
+  const scale = moving && big ? 1 : pixels;
   const ctx = canvas.getContext('2d');
-  ctx.scale(scale, scale);
+  sharpRun++;
   clampLens(width, height);
-  ctx.translate(lens.x, lens.y);
-  ctx.scale(lens.zoom, lens.zoom);
 
   const shape = coneShape(width, height);
-  const count = layout.rows.length;
   const spin = (turn + (frame.lanes - 1) / 2) / cone.side * TAU;
-  const xs = new Float32Array(count);
-  const ys = new Float32Array(count);
-  const nears = new Float32Array(count);
-  const lit = new Uint8Array(count);
-  for (let i = 0; i < count; i++) {
-    const point = conePoint(shape, cone.angle[i] - spin, cone.drop[i]);
-    xs[i] = cone.lane[i] === 0 ? shape.cx : point.x;
-    ys[i] = point.y;
-    nears[i] = cone.lane[i] === 0 ? 0 : point.near;
-    lit[i] = cone.lane[i] === 0 || frame.kept.has(i) || (cone.lane[i] - 1 - frame.offset + cone.side) % cone.side < frame.lanes - 1 ? 1 : 0;
+  const { xs, ys, nears, lit } = cone;
+  project(cone.angle, cone.drop, shape, spin, cone);
+  for (const row of cone.spine) {
+    xs[row] = shape.cx;
+    nears[row] = 0;
+  }
+  lit.fill(0);
+  for (const { row } of frame.rows) lit[row] = 1;
+
+  const view = { left: -lens.x / lens.zoom, top: -lens.y / lens.zoom, right: (width - lens.x) / lens.zoom, bottom: (height - lens.y) / lens.zoom };
+  let links = 0;
+  for (const group of cone.groups) {
+    group.length = linksInView(group.all, xs, ys, view, group.seen);
+    links += group.length / 2;
+  }
+  for (const group of cone.traced) group.length = linksInView(group.all, xs, ys, view, group.seen);
+
+  if (big && !moving) {
+    const step = Math.max(1, links / STILL_LINKS);
+    buildSharp(ctx, canvas, scale, width, height, step, () => drawOverlay(ctx, shape, frame, spin, seen, rings, nodes, false));
+    return;
   }
 
-  // Lines stay thin as they spread apart, so they can afford to brighten.
-  const clarity = Math.min(MAX_CLARITY, Math.sqrt(lens.zoom));
+  const now = performance.now();
+  if (moving && big) spinLinks = adjustDetail(spinLinks, now - lastMove);
+  lastMove = now;
+  const step = moving ? Math.max(1, links / spinLinks) : 1;
+  const weight = Math.sqrt(step);
+  fitCanvas(canvas, width, height, scale);
+  aimContext(ctx, scale);
   ctx.lineWidth = 0.6 / lens.zoom;
-  const layers = [
-    [BACK_ALPHA, (a, b) => nears[a] + nears[b] < 0],
-    [FRONT_ALPHA * clarity, (a, b) => nears[a] + nears[b] >= 0],
-  ];
-  for (const [alpha, keep] of layers) {
-    ctx.globalAlpha = alpha;
-    for (const [style, pairs] of cone.groups) {
-      ctx.strokeStyle = cssVar(style);
-      strokeEdges(ctx, pairs, xs, ys, keep);
+  for (const [alpha, front] of lineLayers()) {
+    ctx.globalAlpha = Math.min(1, alpha * weight);
+    for (const group of cone.groups) {
+      ctx.strokeStyle = cssVar(group.style);
+      strokeLayer(ctx, group, front, step);
     }
   }
-  drawTread(ctx, shape, layout, spin);
-
-  ctx.lineWidth = 1.2 / lens.zoom;
-  for (const [style, pairs] of cone.groups) {
-    ctx.strokeStyle = cssVar(style);
-    strokeEdges(ctx, pairs, xs, ys, (a, b) => lit[a] && lit[b]);
-  }
-  ctx.fillStyle = cssVar('--fg');
-  const dot = 2.5 / lens.zoom;
-  for (let i = 0; i < count; i++) {
-    if (lit[i]) continue;
-    if (lens.zoom >= DOTS_FROM_ZOOM && nears[i] >= 0) ctx.fillRect(xs[i] - dot / 4, ys[i] - dot / 4, dot / 2, dot / 2);
-  }
-  for (let i = 0; i < count; i++) {
-    if (lit[i]) ctx.fillRect(xs[i] - dot / 2, ys[i] - dot / 2, dot, dot);
-  }
-  if (frame.rotates) drawStrip(ctx, shape, frame, spin, seen);
+  drawOverlay(ctx, shape, frame, spin, seen, rings, nodes, moving);
 }
 
 // Lanes to turn per pixel dragged, so the front of the cone follows the pointer.

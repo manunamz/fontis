@@ -21,4 +21,4 @@ http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': TYPES[path.extname(file)] || 'application/octet-stream' });
     res.end(body);
   });
-}).listen(PORT, () => console.log(`pprhub → http://localhost:${PORT}`));
+}).listen(PORT, '127.0.0.1', () => console.log(`fontis → http://localhost:${PORT}`));

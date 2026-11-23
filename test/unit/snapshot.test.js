@@ -2,6 +2,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 const { crawl, prune, toNode, firstLoad, treeColumns, readCache } = require('../../scripts/snapshot');
+const { parseRef } = require('../../public/lib/crawl');
 
 const work = (id, cited, refs = []) => ({
   id: `https://openalex.org/${id}`,
@@ -126,4 +127,16 @@ test('treeColumns gives every paper a dot and ids only down to detail', async ()
 
 test('readCache skips a torn last line', () => {
   assert.deepEqual(readCache('{"dead":"W1"}\n{"dead":"W2"}\n{"node":{"id'), [{ dead: 'W1' }, { dead: 'W2' }]);
+});
+
+test('parseRef reads DOIs, arXiv IDs and OpenAlex IDs however they are pasted', () => {
+  assert.equal(parseRef('10.1038/171737a0'), 'doi:10.1038/171737a0');
+  assert.equal(parseRef(' https://doi.org/10.1038/171737a0 '), 'doi:10.1038/171737a0');
+  assert.equal(parseRef('doi:10.1038/171737a0'), 'doi:10.1038/171737a0');
+  assert.equal(parseRef('1706.03762'), 'doi:10.48550/arXiv.1706.03762');
+  assert.equal(parseRef('https://arxiv.org/abs/1706.03762v5'), 'doi:10.48550/arXiv.1706.03762');
+  assert.equal(parseRef('arXiv:1706.03762'), 'doi:10.48550/arXiv.1706.03762');
+  assert.equal(parseRef('https://openalex.org/W2626778328'), 'W2626778328');
+  assert.equal(parseRef('attention is all you need'), null);
+  assert.equal(parseRef(''), null);
 });

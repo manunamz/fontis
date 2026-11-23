@@ -4,8 +4,16 @@
 'use strict';
 
 const PAPERS = [
-  { slug: 'attention', label: 'Attention Is All You Need' },
-  { slug: 'watson-crick', label: 'Watson–Crick 1953' },
+  { slug: 'attention', seed: 'W2626778328', label: 'Attention Is All You Need' },
+  { slug: 'watson-crick', seed: 'W2126466006', label: 'Watson–Crick 1953' },
+  { slug: 'alphafold', seed: 'W3177828909', label: 'AlphaFold 2021' },
+  { slug: 'crispr', seed: 'W2045435533', label: 'CRISPR 2012' },
+  { slug: 'hallmarks', seed: 'W2117692326', label: 'Hallmarks of Cancer 2011' },
+  { slug: 'graphene', seed: 'W2058122340', label: 'Graphene 2004' },
+  { slug: 'ligo', seed: 'W2252795400', label: 'Gravitational Waves 2016' },
+  { slug: 'black-scholes', seed: 'W2077791698', label: 'Black–Scholes 1973' },
+  { slug: 'weak-ties', seed: 'W2109469951', label: 'The Strength of Weak Ties' },
+  { slug: 'greenberg', seed: 'W2023155726', label: 'Citation Distortions 2009' },
 ];
 const $ = (id) => document.getElementById(id);
 
@@ -14,6 +22,12 @@ const MAX_WINDOW = 24;
 const GRAPH_SHARE = 0.36; // of the table's width
 const SPIN_FRICTION = 0.94;
 const SPIN_STOP = 0.002; // lanes per ms
+const SPIN_HOP_MS = 700;
+const SLIDE_MS = 320;
+const SLIDE_REACH = 1.5; // viewports: further than this a row fades in instead
+const FLY_MS = 520;
+const FLY_BEND = -60; // px the dot's path bows towards the graph
+const TABLE_MS = 150; // how often a spinning cone refreshes the table
 
 let paper = null;
 let snapshot = null;
@@ -26,10 +40,18 @@ let childCount = new Map();
 let suspectsOf = new Map();
 let hiddenRefs = new Map();
 let selected = null;
+let cameFrom = []; // papers hopped from, most recent last
 let offset = 0;
 let paintQueued = false;
 let paintedLayout = null;
+let holdTable = false; // a spin to a paper leaves the table alone until it stops
+let selectRun = 0; // a newer selection abandons an older one's animation
 let closeGaps = true;
+let settle = null; // the full draw waiting for the cone to stop
+let tablePainted = 0;
+let tableBehind = false;
+let pinned = false; // the table stays put while the cone turns on its own
+let coneTurn = 0; // where the cone faces while pinned, in lanes like `offset`
 const expanded = new Set();
 
 function el(tag, className, text) {
@@ -81,12 +103,10 @@ function renderHead() {
   head.append(stats);
 }
 
-function renderSwitcher(current) {
-  const nav = $('papers');
+function renderPills(nav) {
   for (const paper of PAPERS) {
     const a = el('a', null, paper.label);
     a.href = `?paper=${paper.slug}`;
-    if (paper === current) a.setAttribute('aria-current', 'page');
     nav.append(a);
   }
 }
@@ -133,6 +153,7 @@ function rowBadges(node, children) {
 // The first load only has each paper's top references; the rest arrive on demand.
 async function ensureFull() {
   if (!snapshot.partial) return;
+  if (paper.full) { snapshot = paper.full; return; }
   $('log-more').hidden = false;
   $('log-more').textContent = 'Loading every paper…';
   const res = await fetch(`snapshots/${paper.slug}.full.json`);
@@ -226,7 +247,10 @@ function renderRow(row) {
     el('span', 'c-num', node.missing ? '' : formatCount(node.cited)),
     el('span', 'c-year', node.year || ''),
   );
-  const toggle = () => select(selected === row.id ? null : row.id);
+  const toggle = () => {
+    cameFrom = [];
+    select(selected === row.id ? null : row.id);
+  };
   item.addEventListener('click', toggle);
   item.addEventListener('keydown', (e) => {
     if (e.target === item && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); toggle(); }
@@ -251,6 +275,7 @@ function render() {
   view = Lineage.select(snapshot, currentOptions());
   layout = Lineage.layout(view.ids, view.edges, view.nodes, { grouped: isConeView() });
   if (selected && !view.ids.includes(selected)) selected = null;
+  cameFrom = cameFrom.filter((id) => view.ids.includes(id));
   indexLayout();
   paint();
   renderSource();
@@ -280,15 +305,26 @@ function rowsInSight() {
 function paint() {
   const previous = frame;
   const keep = selected ? Lineage.connections(selected, layout.edges) : new Set();
+  if (previousPaper()) keep.add(previousPaper());
   frame = Lineage.windowView(layout, { offset: Math.round(offset), width: windowWidth(), keep });
   offset = frame.rotates ? ((offset % frame.sideLanes) + frame.sideLanes) % frame.sideLanes : 0;
   renderRotator();
-  const moved = paintedLayout !== layout || previous.offset !== frame.offset || previous.lanes !== frame.lanes;
-  if (isConeView() && !moved) {
-    drawCone(layout, view.nodes, frame, offset, rowsInSight());
+  const moved = previous?.offset !== frame.offset || previous?.lanes !== frame.lanes;
+  // Rebuilding the table is the slow part of a turn, so a spin only catches it up now and then.
+  const early = paintedLayout === layout && performance.now() - tablePainted < TABLE_MS;
+  if (moved) tableBehind = true;
+  if (isConeView() && paintedLayout === layout && (!moved || early || holdTable)) {
+    paintCone();
     return;
   }
+  paintTable();
+  if (isConeView()) paintCone();
+}
+
+function paintTable() {
   paintedLayout = layout;
+  tablePainted = performance.now();
+  tableBehind = false;
   // A window fills few rows of a wide graph, so by default the gaps close up.
   table = closeGaps ? Lineage.compactRows(frame) : frame;
   document.documentElement.style.setProperty('--graph-w', `${graphWidth(frame.drawnLanes)}px`);
@@ -297,7 +333,25 @@ function paint() {
   body.replaceChildren(drawGraph(table, view.nodes, snapshot.seed, frontier), ...table.rows.map(renderRow));
   applySelection();
   renderMore();
-  if (isConeView()) drawCone(layout, view.nodes, frame, offset, rowsInSight());
+}
+
+// Draws quickly while the cone is moving, then in full once it stops.
+function paintCone() {
+  const draw = (moving) => {
+    const ring = (id, strong) => {
+      const row = Lineage.findRow(layout, id);
+      return row ? [{ row: row.row, strong }] : [];
+    };
+    const rings = [...ring(previousPaper(), false), ...ring(selected, true)];
+    drawCone(layout, view.nodes, frame, pinned ? coneTurn : offset, rowsInSight(), rings, selectedTrail(), moving);
+  };
+  draw(true);
+  clearTimeout(settle);
+  settle = setTimeout(() => {
+    if (!isConeView()) return;
+    if (tableBehind && !holdTable) paintTable();
+    draw(false);
+  }, SETTLE_MS);
 }
 
 function setConeView(on) {
@@ -306,6 +360,7 @@ function setConeView(on) {
     document.body.classList.toggle('cone-view', on);
     $('cone').hidden = !on;
     offset = 0;
+    coneTurn = 0;
     window.scrollTo(0, 0);
     render();
   });
@@ -329,6 +384,22 @@ function turnTo(next) {
   queuePaint();
 }
 
+// Turn only the cone. The table's strip moves round it, still marking what the table shows.
+function turnCone(next) {
+  coneTurn = frame.rotates ? ((next % frame.sideLanes) + frame.sideLanes) % frame.sideLanes : 0;
+  if (paintQueued) return;
+  paintQueued = true;
+  requestAnimationFrame(() => { paintQueued = false; paintCone(); });
+}
+
+// Unpinning brings the table round to where the cone was left facing.
+function setPinned(on) {
+  pinned = on;
+  $('cone-pin').setAttribute('aria-pressed', on);
+  if (on) coneTurn = offset;
+  else turnTo(coneTurn);
+}
+
 // The line of descent at the middle of the window.
 function frontSector() {
   const middle = (frame.offset + Math.floor((frame.lanes - 1) / 2)) % frame.sideLanes + 1;
@@ -337,8 +408,8 @@ function frontSector() {
 
 function renderRotator() {
   const { rotates, sideLanes } = frame;
-  $('rotator').hidden = !rotates && !isConeView();
   $('rotator').classList.toggle('still', !rotates);
+  $('cone-pin').hidden = !rotates;
   $('log-body').classList.toggle('rotates', rotates);
   if (!rotates) {
     $('spin-label').textContent = `all ${sideLanes + 1} lanes · ${layout.rows.length.toLocaleString()} rows`;
@@ -369,46 +440,163 @@ function renderSource() {
   $('source').textContent = `Measured from ${snapshot.source} on ${snapshot.fetched}. Counts change as the database does.${cycleNote}${suspectNote}`;
 }
 
+const previousPaper = () => (selected ? cameFrom[cameFrom.length - 1] : undefined);
+
+// The selected paper's whole line, kept while the selection and layout stay put,
+// since a big tree's cone asks for it on every frame.
+let traced = { id: null, layout: null, trail: null };
+function selectedTrail() {
+  if (!selected) return null;
+  if (traced.id !== selected || traced.layout !== layout) {
+    traced = { id: selected, layout, trail: Lineage.lineage(selected, layout.edges) };
+  }
+  return traced.trail;
+}
+
 function applySelection() {
   const body = $('log-body');
-  const trail = selected ? Lineage.lineage(selected, layout.edges) : null;
+  const trail = selectedTrail();
   body.classList.toggle('tracing', !!trail);
   for (const row of body.querySelectorAll('.log-row')) {
     row.classList.toggle('on-trail', !!trail && trail.has(row.dataset.id));
     row.classList.toggle('is-selected', row.dataset.id === selected);
+    const from = row.dataset.id === previousPaper();
+    row.classList.toggle('came-from', from);
+    row.querySelector('.badge-from')?.remove();
+    if (from) row.querySelector('.c-msg').prepend(badge('came from here', 'from'));
   }
   for (const path of body.querySelectorAll('.edge')) {
     path.classList.toggle('on-trail', !!trail && trail.has(path.dataset.child) && trail.has(path.dataset.parent));
   }
   for (const mark of body.querySelectorAll('[data-id]:not(.log-row)')) {
     mark.classList.toggle('on-trail', !!trail && trail.has(mark.dataset.id));
+    mark.classList.toggle('is-selected', mark.dataset.id === selected);
   }
   renderDetail();
 }
 
-const rowTop = (id) => document.querySelector(`.log-row[data-id="${id}"]`)?.getBoundingClientRect().top;
+const rowOf = (id) => document.querySelector(`.log-row[data-id="${id}"]`);
+const calm = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-// Selecting a paper brings its connections into the table, which moves rows
-// around, so the paper clicked stays where it is on screen. One on a lane out
-// of view turns the graph to it.
-function select(id) {
+function rowTops() {
+  const tops = new Map();
+  for (const row of $('log-body').querySelectorAll('.log-row')) tops.set(row.dataset.id, row.getBoundingClientRect().top);
+  return tops;
+}
+
+function ease(t) {
+  return t < 0.5 ? 2 * t * t : 1 - (2 - 2 * t) ** 2 / 2;
+}
+
+// Turn the cone the short way round to `target`, leaving the table alone until it stops.
+function spinTo(target, run, done) {
+  const side = frame.sideLanes;
+  const start = offset;
+  const distance = ((target - start + side * 1.5) % side) - side / 2;
+  const began = performance.now();
+  holdTable = true;
+  const step = (now) => {
+    if (run !== selectRun) return;
+    const t = Math.min(1, (now - began) / SPIN_HOP_MS);
+    offset = start + distance * ease(t);
+    paint();
+    if (t < 1) requestAnimationFrame(step);
+    else done();
+  };
+  requestAnimationFrame(step);
+}
+
+// Rows that survive a repaint slide from where they were, and new ones fade in.
+function slideRows(before) {
+  const reach = window.innerHeight * SLIDE_REACH;
+  for (const row of $('log-body').querySelectorAll('.log-row')) {
+    const top = row.getBoundingClientRect().top;
+    if (top < -ROW_H || top > window.innerHeight) continue;
+    const from = before.get(row.dataset.id);
+    if (from !== undefined && Math.abs(from - top) < reach && from !== top) {
+      row.animate([{ transform: `translateY(${from - top}px)` }, { transform: 'none' }], { duration: SLIDE_MS, easing: 'ease-in-out' });
+    } else if (from === undefined || Math.abs(from - top) >= reach) {
+      row.animate([{ opacity: 0 }, { opacity: 1 }], { duration: SLIDE_MS });
+    }
+  }
+}
+
+function crossfadeGraph(old) {
+  const body = $('log-body');
+  body.querySelector('.graph:not(.leaving)')?.animate([{ opacity: 0 }, { opacity: 1 }], { duration: SLIDE_MS });
+  if (!old) return;
+  old.classList.add('leaving');
+  body.append(old);
+  old.animate([{ opacity: 1 }, { opacity: 0 }], { duration: SLIDE_MS }).onfinish = () => old.remove();
+}
+
+// A dot flies from the click to the paper, so the eye has something to follow.
+function flyDot(from, id, done) {
+  const mark = $('log-body').querySelector(`.graph:not(.leaving) [data-id="${id}"]`);
+  if (!from || !mark) { done(); return; }
+  const box = mark.getBoundingClientRect();
+  const to = { x: box.left + box.width / 2, y: box.top + box.height / 2 };
+  const dot = el('div', 'flyer');
+  document.body.append(dot);
+  const at = ({ x, y }) => `translate(${x}px, ${y}px)`;
+  const bend = { x: (from.x + to.x) / 2 + FLY_BEND, y: (from.y + to.y) / 2 };
+  dot.animate([{ transform: at(from) }, { transform: at(bend) }, { transform: at(to) }], { duration: FLY_MS, easing: 'ease-in-out' }).onfinish = () => {
+    dot.remove();
+    done();
+  };
+}
+
+// Selecting a paper brings its connections into the table, so everything moves
+// from where it was: the cone spins to the paper if it's out of view, rows
+// slide, and a hop's dot flies to where it landed. `point` is where the hop began.
+function select(id, point = null) {
+  if (!id) cameFrom = [];
+  const run = ++selectRun;
   const anchor = id || selected;
-  const before = anchor && rowTop(anchor);
+  const before = rowTops();
+  const oldGraph = $('log-body').querySelector('.graph:not(.leaving)');
   selected = id;
-  const row = id && layout.rows.find((r) => r.id === id);
-  if (row && !frame.rows.some((r) => r.id === id)) {
-    offset = Lineage.offsetFor(row.lane, { width: frame.lanes - 1, sideLanes: frame.sideLanes });
-  }
-  paintedLayout = null;
-  paint();
-  if (before === undefined || before === null) {
-    if (id) document.querySelector(`.log-row[data-id="${id}"]`)?.scrollIntoView({ block: 'center' });
-    return;
-  }
-  const after = rowTop(anchor);
-  if (after === undefined) return;
-  if (isConeView()) $('log-scroll').scrollTop += after - before;
-  else window.scrollBy(0, after - before);
+  applySelection();
+
+  const row = id && Lineage.findRow(layout, id);
+  const needsTurn = row && !frame.rows.some((r) => r.id === id);
+  const target = needsTurn ? Lineage.offsetFor(row.lane, { width: frame.lanes - 1, sideLanes: frame.sideLanes }) : offset;
+
+  const settle = () => {
+    if (run !== selectRun) return;
+    holdTable = false;
+    offset = target;
+    paintedLayout = null;
+    paint();
+    const landed = id && rowOf(id);
+    const held = before.get(anchor);
+    const scroller = isConeView() ? $('log-scroll') : null;
+    if (held !== undefined && rowOf(anchor)) {
+      const shift = rowOf(anchor).getBoundingClientRect().top - held;
+      if (scroller) scroller.scrollTop += shift;
+      else window.scrollBy(0, shift);
+    }
+    const top = landed?.getBoundingClientRect().top;
+    if (landed && (top < 0 || top > window.innerHeight - ROW_H)) landed.scrollIntoView({ block: 'center' });
+    const pulse = () => { if (run === selectRun) rowOf(id)?.classList.add('just-selected'); };
+    if (calm()) { pulse(); return; }
+    slideRows(before);
+    crossfadeGraph(oldGraph);
+    flyDot(point, id, pulse);
+  };
+
+  if (needsTurn && isConeView() && !calm()) spinTo(target, run, settle);
+  else settle();
+}
+
+// Follow a link to another paper, remembering the way back.
+function hopTo(id, from, point) {
+  if (from && from !== id) cameFrom.push(from);
+  select(id, point);
+}
+
+function hopBack(e) {
+  select(cameFrom.pop(), { x: e.clientX, y: e.clientY });
 }
 
 function fact(label, value) {
@@ -423,7 +611,7 @@ function paperList(papers) {
     const li = el('li');
     const btn = el('button', 'linklike', p.missing ? deadLabel(p) : p.title);
     btn.type = 'button';
-    btn.addEventListener('click', () => select(p.id));
+    btn.addEventListener('click', (e) => hopTo(p.id, selected, { x: e.clientX, y: e.clientY }));
     li.append(btn);
     list.append(li);
   }
@@ -444,7 +632,20 @@ function paperLinks(node) {
   return out;
 }
 
+function backLink() {
+  const node = view.nodes[previousPaper()];
+  const btn = el('button', 'linklike back-link', `← back to ${node.missing ? deadLabel(node) : node.title}`);
+  btn.type = 'button';
+  btn.addEventListener('click', hopBack);
+  return btn;
+}
+
 function renderDetail() {
+  fillDetail();
+  if (previousPaper()) $('detail').prepend(backLink());
+}
+
+function fillDetail() {
   const pane = $('detail');
   if (!selected) {
     pane.replaceChildren(
@@ -497,13 +698,13 @@ function renderDetail() {
 
 function initTheme() {
   let saved = null;
-  try { saved = localStorage.getItem('pprhub-theme'); } catch { /* storage blocked */ }
+  try { saved = localStorage.getItem('fontis-theme'); } catch { /* storage blocked */ }
   const prefersLight = matchMedia('(prefers-color-scheme: light)').matches;
   document.documentElement.dataset.theme = saved || (prefersLight ? 'light' : 'dark');
   $('theme-toggle').addEventListener('click', () => {
     const next = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
     document.documentElement.dataset.theme = next;
-    try { localStorage.setItem('pprhub-theme', next); } catch { /* storage blocked */ }
+    try { localStorage.setItem('fontis-theme', next); } catch { /* storage blocked */ }
     drawOverview();
     if (layout) paint();
   });
@@ -511,13 +712,13 @@ function initTheme() {
 
 // Drag or swipe across `target` to turn the graph; let go mid-swipe and it keeps
 // spinning for a moment. `lanesPerPx` and `inReach` are asked at each gesture.
-function addSpin(target, lanesPerPx, inReach, stopSpin, setSpinning) {
+function addSpin(target, lanesPerPx, inReach, stopSpin, setSpinning, at = () => offset, turn = turnTo) {
   let drag = null;
 
   target.addEventListener('pointerdown', (e) => {
     if (!frame.rotates || !inReach(e)) return;
     stopSpin();
-    drag = { x: e.clientX, start: offset, moved: false, lastX: e.clientX, lastT: e.timeStamp, speed: 0, rate: lanesPerPx() };
+    drag = { x: e.clientX, start: at(), moved: false, lastX: e.clientX, lastT: e.timeStamp, speed: 0, rate: lanesPerPx() };
   });
   target.addEventListener('pointermove', (e) => {
     if (!drag) return;
@@ -527,7 +728,7 @@ function addSpin(target, lanesPerPx, inReach, stopSpin, setSpinning) {
     drag.speed = (drag.lastX - e.clientX) * drag.rate / Math.max(1, e.timeStamp - drag.lastT);
     drag.lastX = e.clientX;
     drag.lastT = e.timeStamp;
-    turnTo(drag.start - dx * drag.rate);
+    turn(drag.start - dx * drag.rate);
   });
   const release = (e) => {
     if (!drag) return;
@@ -539,13 +740,13 @@ function addSpin(target, lanesPerPx, inReach, stopSpin, setSpinning) {
     setTimeout(() => target.classList.remove('just-dragged'));
     if (stale || matchMedia('(prefers-reduced-motion: reduce)').matches) return;
     let velocity = speed;
-    let position = offset;
+    let position = at();
     let last = performance.now();
     const coast = (now) => {
       position += velocity * (now - last);
       last = now;
       velocity *= SPIN_FRICTION;
-      turnTo(position);
+      turn(position);
       setSpinning(Math.abs(velocity) > SPIN_STOP ? requestAnimationFrame(coast) : null);
     };
     setSpinning(requestAnimationFrame(coast));
@@ -564,7 +765,7 @@ function addSpin(target, lanesPerPx, inReach, stopSpin, setSpinning) {
     wheelRest += e.deltaX * lanesPerPx();
     const steps = Math.trunc(wheelRest);
     wheelRest -= steps;
-    if (steps) turnTo(offset + steps);
+    if (steps) turn(at() + steps);
   }, { passive: false });
 }
 
@@ -574,9 +775,13 @@ function initRotation() {
   const setSpinning = (id) => { spinning = id; };
 
   const body = $('log-body');
-  body.addEventListener('click', (e) => { if (e.target.dataset.to) select(e.target.dataset.to); });
+  body.addEventListener('click', (e) => {
+    if (e.target.dataset.to) hopTo(e.target.dataset.to, e.target.dataset.from, { x: e.clientX, y: e.clientY });
+  });
   addSpin(body, () => 1 / LANE_W, (e) => e.clientX - body.getBoundingClientRect().left <= graphWidth(frame.drawnLanes), stopSpin, setSpinning);
-  addSpin($('cone-canvas'), () => coneLanesPerPx(frame), () => true, stopSpin, setSpinning);
+  addSpin($('cone-canvas'), () => coneLanesPerPx(frame), () => true, stopSpin, setSpinning,
+    () => (pinned ? coneTurn : offset), (next) => (pinned ? turnCone(next) : turnTo(next)));
+  $('cone-pin').addEventListener('click', () => { stopSpin(); setPinned(!pinned); });
 
   initConeZoom(queuePaint);
   $('log-scroll').addEventListener('scroll', () => { if (isConeView()) queuePaint(); });
@@ -587,16 +792,39 @@ function initRotation() {
 }
 
 async function loadOverview() {
+  if (paper.tree) { initOverview(paper.tree, reveal); return; }
   try {
     const res = await fetch(`snapshots/${paper.slug}.tree.json`);
     if (res.ok) initOverview(await res.json(), reveal);
   } catch { /* the graph works without it */ }
 }
 
+function initInfoTabs(box) {
+  const tabs = [...box.querySelectorAll('.info-tabs button')];
+  for (const tab of tabs) {
+    tab.addEventListener('click', () => {
+      for (const other of tabs) {
+        other.setAttribute('aria-pressed', String(other === tab));
+        box.querySelector(`[data-panel="${other.dataset.tab}"]`).hidden = other !== tab;
+      }
+      box.scrollTop = 0;
+    });
+  }
+}
+
 async function start() {
   initTheme();
   initRotation();
-  $('info-btn').addEventListener('click', () => $('info').showModal());
+  $('info-btn').addEventListener('click', () => {
+    $('info').showModal();
+    $('info').scrollTop = 0; // its close button takes focus, at the bottom
+  });
+  initInfoTabs($('info'));
+  $('info').addEventListener('click', (e) => {
+    const box = $('info').getBoundingClientRect(); // the backdrop's clicks land on the dialog too
+    const inside = e.clientX >= box.left && e.clientX <= box.right && e.clientY >= box.top && e.clientY <= box.bottom;
+    if (!inside) $('info').close();
+  });
   for (const id of ['depth', 'parents', 'dead']) $(id).addEventListener('change', render);
   $('show-all').addEventListener('click', toggleShowAll);
   $('cone-open').addEventListener('click', () => setConeView(true));
@@ -608,19 +836,26 @@ async function start() {
     else select(null);
   });
 
-  const requested = new URLSearchParams(location.search).get('paper');
-  paper = PAPERS.find((p) => p.slug === requested) || PAPERS[0];
-  renderSwitcher(paper);
+  const params = new URLSearchParams(location.search);
+  const work = Crawl.parseRef(params.get('work') || '');
+  paper = PAPERS.find((p) => p.slug === params.get('paper'));
+  if (!paper && !work) { showHome(); return; }
 
-  try {
-    const res = await fetch(`snapshots/${paper.slug}.json`);
-    if (!res.ok) throw new Error(res.status);
-    snapshot = await res.json();
-  } catch {
-    $('paper-head').replaceChildren(el('h1', null, 'Could not load the snapshot'));
-    return;
+  if (paper) {
+    try {
+      const res = await fetch(`snapshots/${paper.slug}.json`);
+      if (!res.ok) throw new Error(res.status);
+      snapshot = await res.json();
+    } catch {
+      $('paper-head').replaceChildren(el('h1', null, 'Could not load the snapshot'));
+      return;
+    }
+  } else {
+    paper = await crawlPaper(work);
+    if (!paper) return;
+    snapshot = paper.first;
   }
-  document.title = `${snapshot.nodes[snapshot.seed].title} · pprhub`;
+  document.title = `${snapshot.nodes[snapshot.seed].title} · Fontis`;
   fillDepthOptions();
   renderHead();
   render();

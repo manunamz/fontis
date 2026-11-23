@@ -2,6 +2,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 const { select, order, layout, lineage, connections, frontier, hiddenCount, hiddenParents, windowView, compactRows, offsetFor } = require('../../public/lib/lineage');
+const { project, adjustDetail, linksInView } = require('../../public/lib/projection');
 
 const paper = (id, year, cited, parents = [], dead = []) => ({ id, title: id, year, cited, parents, dead });
 
@@ -373,4 +374,57 @@ test('windowView tails list the papers they lead to', () => {
   assert.ok(hidden.length > 0);
   for (const id of hidden) assert.ok(links.some((l) => l.id === id && l.cites), `S links to ${id}`);
   assert.ok(frame.stubs.every((s) => s.links.length > 0));
+});
+
+test('project places a paper on the cone the way the tip and rim say it should', () => {
+  const shape = { radius: 100, length: 500, cx: 200, top: 10 };
+  const buffers = { xs: new Float32Array(3), ys: new Float32Array(3), nears: new Float32Array(3) };
+  project(new Float32Array([0, 0, Math.PI / 2]), new Float32Array([0, 1, 1]), shape, 0, buffers);
+  assert.ok(Math.abs(buffers.xs[0] - 200) < 1e-3, 'the tip sits on the axis');
+  assert.ok(Math.abs(buffers.ys[0] - 10) < 1e-3, 'the tip sits at the top');
+  assert.ok(Math.abs(buffers.xs[1] - 200) < 1e-3, 'straight ahead stays on the axis');
+  assert.ok(Math.abs(buffers.nears[1] - 1) < 1e-3, 'straight ahead is nearest');
+  assert.ok(buffers.xs[2] > 290, 'a quarter turn reaches the edge');
+  assert.ok(Math.abs(buffers.nears[2]) < 1e-3, 'a quarter turn is neither front nor back');
+});
+
+test('project turns the cone by the spin', () => {
+  const shape = { radius: 100, length: 500, cx: 200, top: 10 };
+  const buffers = { xs: new Float32Array(1), ys: new Float32Array(1), nears: new Float32Array(1) };
+  project(new Float32Array([1]), new Float32Array([1]), shape, 1, buffers);
+  assert.ok(Math.abs(buffers.nears[0] - 1) < 1e-3);
+});
+
+test('adjustDetail halves the links when frames run slow, down to a floor', () => {
+  assert.equal(adjustDetail(30000, 40), 15000);
+  assert.equal(adjustDetail(4000, 80), 3000);
+});
+
+test('adjustDetail creeps back up when frames keep time, up to a ceiling', () => {
+  assert.equal(adjustDetail(16000, 17), 17600);
+  assert.equal(adjustDetail(40000, 17), 40000);
+});
+
+test('adjustDetail leaves the links alone in between, or after a pause', () => {
+  assert.equal(adjustDetail(20000, 24), 20000);
+  assert.equal(adjustDetail(20000, 500), 20000);
+});
+
+test('linksInView keeps a link that crosses the view and drops the rest', () => {
+  const xs = new Float32Array([10, 20, 500, 600, -50, 150, 50]);
+  const ys = new Float32Array([10, 20, 500, 600, 50, 50, 500]);
+  const pairs = new Int32Array([0, 1, 2, 3, 4, 5, 0, 6]);
+  const out = new Int32Array(pairs.length);
+  const box = { left: 0, right: 100, top: 0, bottom: 100 };
+  assert.deepEqual([...out.subarray(0, linksInView(pairs, xs, ys, box, out))], [0, 1, 4, 5, 0, 6]);
+});
+
+test('windowView gives the same result however many times it turns', () => {
+  const edges = [['seed', 'a'], ['seed', 'b'], ['seed', 'c'], ['seed', 'd'], ['a', 'e'], ['b', 'e'], ['c', 'f'], ['d', 'g']];
+  const ids = ['seed', 'a', 'b', 'c', 'd', 'e', 'f', 'g'];
+  const nodes = Object.fromEntries(ids.map((id, i) => [id, { id, year: 2020 - i, cited: 10 - i }]));
+  const graph = layout(ids, edges, nodes);
+  const first = windowView(graph, { offset: 1, width: 2 });
+  windowView(graph, { offset: 3, width: 2 });
+  assert.deepEqual(windowView(graph, { offset: 1, width: 2 }), first);
 });

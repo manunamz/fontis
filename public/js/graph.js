@@ -89,6 +89,7 @@ function fadeStub(row) {
 function stubHit(stub, nodes) {
   const hit = svgEl('path', { d: stubPath(stub), class: 'stub-hit' });
   hit.dataset.to = stub.links[0].id;
+  hit.dataset.from = stub.links[0].paper;
   const label = ({ id, cites }) => `${cites ? 'cites' : 'cited by'}: ${nodes[id].missing ? 'references not found' : nodes[id].title}`;
   const shown = stub.links.slice(0, STUB_NAMES).map(label);
   if (stub.links.length > STUB_NAMES) shown.push(`+${stub.links.length - STUB_NAMES} more`);

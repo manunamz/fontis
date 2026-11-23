@@ -3,23 +3,40 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>pprhub</title>
+  <title>Fontis</title>
   <link rel="stylesheet" href="style.css">
   <link rel="icon" href="logo-mark.svg">
 </head>
 <body>
   <header class="topbar">
-    <a class="brand" href="./"><img class="brand-mark" src="logo-mark.svg" alt=""> pprhub</a>
-    <span class="tagline">a paper's references are its parent commits</span>
-    <button class="ghost" id="info-btn" title="what is pprhub?">?</button>
+    <a class="brand" href="./"><img class="brand-mark" src="logo-mark.svg" alt=""> fontis</a>
+    <span class="tagline">where did that theory come from?</span>
+    <button class="ghost" id="info-btn" title="what is Fontis?">?</button>
     <button class="ghost" id="theme-toggle" title="toggle light/dark">◐</button>
   </header>
 
+  <section class="home" id="home" hidden>
+    <section class="intro" id="intro" aria-label="what is Fontis?" hidden>
+      <button class="ghost text" id="intro-dismiss" type="button">got it, don't show again</button>
+    </section>
+    <h1>Where did that theory come from?</h1>
+    <p>Follow a paper's references as far as they go, and see where they stop.</p>
+    <form class="search" role="search">
+      <input type="search" id="search" placeholder="Title, author, DOI or arXiv ID" aria-label="find a paper" autocomplete="off" spellcheck="false">
+    </form>
+    <div class="results" id="results" hidden></div>
+    <nav class="papers" id="home-papers" aria-label="papers ready to view"></nav>
+  </section>
+
+  <section class="home" id="crawl" aria-live="polite" hidden>
+    <h1 id="crawl-title">Finding the paper…</h1>
+    <p id="crawl-status"></p>
+    <p class="crawl-note" id="crawl-note">This runs in your tab, so keep it open.</p>
+    <button class="ghost text" id="crawl-stop" type="button" hidden>stop</button>
+    <p><a href="./">Back to search</a></p>
+  </section>
+
   <main>
-    <div class="page-top">
-      <nav class="papers" id="papers" aria-label="papers"></nav>
-      <button class="ghost text" id="cone-open" type="button">cone</button>
-    </div>
     <section class="paper-head" id="paper-head"></section>
 
     <section class="overview" id="overview" aria-label="the whole citation tree" hidden>
@@ -52,6 +69,10 @@
     <div class="workspace">
       <section class="cone" id="cone" aria-label="the whole graph as a spinning cone" hidden>
         <canvas id="cone-canvas"></canvas>
+        <button class="ghost" id="cone-exit" type="button" title="back to the paper" aria-label="back to the paper">←</button>
+        <button class="ghost" id="cone-pin" type="button" aria-pressed="false" title="pin the table: turn the cone without turning it" aria-label="pin the table">
+          <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M6 1.5h4M7 1.5v4L4.5 8.5h7L9 5.5v-4M8 8.5V14.5"/></svg>
+        </button>
         <div class="cone-zoom">
           <button class="ghost" id="cone-zoom-out" type="button" title="zoom out" aria-label="zoom out">−</button>
           <button class="ghost text" id="cone-zoom-reset" type="button" title="fit the whole cone">100%</button>
@@ -60,13 +81,13 @@
         <p class="cone-note">Tip: the seed. Down: older. Axle: its most cited line. Around: one block per reference. Lit: the strip in the table.</p>
       </section>
       <section class="log" id="log" aria-label="citation lineage">
-        <div class="rotator" id="rotator" hidden>
+        <div class="rotator" id="rotator">
+          <button class="ghost text" id="cone-open" type="button">full tree</button>
           <button class="ghost" id="spin-left" type="button" title="turn one window left" aria-label="turn left">‹</button>
           <input type="range" id="spin" min="0" max="0" value="0" aria-label="turn the graph">
           <button class="ghost" id="spin-right" type="button" title="turn one window right" aria-label="turn right">›</button>
           <span class="spin-label" id="spin-label"></span>
           <button class="ghost text" id="cone-gaps" type="button">fixed rows</button>
-          <button class="ghost text" id="cone-exit" type="button">exit</button>
         </div>
         <div class="log-scroll" id="log-scroll">
           <div class="log-header" id="log-header">
@@ -87,27 +108,48 @@
   </main>
 
   <dialog id="info">
-    <h2>What is pprhub?</h2>
-    <p>Git records every commit's parents. Papers record theirs too: the bibliography. pprhub draws those links as a commit graph, so a lineage reads like <code>git log --graph</code>.</p>
+    <div id="info-body">
+    <h2>What is Fontis?</h2>
+    <div class="info-tabs">
+      <button type="button" data-tab="why" aria-pressed="true">Why it exists</button>
+      <button type="button" data-tab="reading" aria-pressed="false">Reading the graph</button>
+    </div>
+    <div data-panel="why">
+    <p><em>Fontis</em> is Latin for "of the source".</p>
+    <p>A paper is supposed to be a record of how we reached some state of knowledge. It follows from the observations and papers before it, and with luck it becomes a building block for later work. Ideally, following its citations as far as they go would end in hard evidence: something we can check with our senses, or logically with a proof. Often it doesn't. Trails stop at assumptions, or at citations that lead nowhere.</p>
+    <p>Many in academia have called for a cleanup of citation and link rot, and those calls have mostly gone unheeded. In this snapshot of <em>Attention Is All You Need</em>, about a quarter of the papers four levels down are dead ends: a dead ID, or no references on record. Some of those are gaps in the database rather than in the paper, and telling them apart is part of the work.</p>
+    <p>Now LLMs are generating papers at a rapid clip, and academics acknowledge that verification is falling behind. LLMs also famously hallucinate citations. One hypothesis: they learned it partly from us, where a citation can point at nothing and nobody checks. We were the model.</p>
+    <p>So how would we even find the rot? Think of a citation as a dependency. In software, a project is only as reliable as its dependency tree, and securing that supply chain is core engineering work. A paper's citations, and their citations, all the way down, are its dependencies. For knowledge, we have almost no tooling to audit that chain.</p>
+    <p>This demo shows one way to start building it. Lay out the citation trail all the way down, and a claim can be checked by checking the history it's built on.</p>
+    <p>Everything shown is measured from a dated OpenAlex snapshot. Nothing here says whether a paper is right on its own. It shows what a paper rests on, and where the trail stops.</p>
+    </div>
+    <div data-panel="reading" hidden>
+    <p>Git records every commit's parents. Papers record theirs in the bibliography. Fontis draws those links as a commit graph, so a lineage reads like <code>git log --graph</code>.</p>
     <ul>
       <li><strong>Commit</strong>: a paper.</li>
       <li><strong>Parents</strong>: its references. Only the most cited are drawn; the controls change how many, and <strong>+n</strong> on a row shows all of that paper's.</li>
       <li><strong>Merge commit</strong>: a paper with several parents, which is nearly all of them.</li>
       <li><strong>Shared ancestor</strong>: a paper where lines join, because several papers in view cite it.</li>
       <li><strong>Spine</strong>: the straight line down the left, following each paper's most cited parent from the seed.</li>
-      <li><strong>Turning the graph</strong>: drag across it, or use the slider. Lanes sit on a loop. Each paper keeps its row, which fills when its lane is in view. A short tail means a link leaves the window. <strong>Graph only</strong> shows the entire graph and the window you're turning.</li>
+      <li><strong>Turning the graph</strong>: drag across it, or use the slider. Lanes sit on a loop, and the table lists the papers on the lanes in view. <strong>Fixed rows</strong> gives every paper its own row instead.</li>
+      <li><strong>Tail</strong>: a link that leaves the view. Hover it to see where it goes, or click it to go there. Clicking a paper brings its line back to the seed into view.</li>
+      <li><strong>Full tree</strong>: the entire graph as a spinning cone, with the seed at the tip, older papers further down, and one block of lanes per reference. The table is the strip facing you, like the part of a tire touching the ground.</li>
       <li><strong>Fading line</strong>: the paper has references this view doesn't reach. The trail carries on.</li>
       <li><strong>Suspect link</strong>: a paper dated more than two years after one citing it, which usually means a bad match or a wrong date.</li>
       <li><strong>Dead ID</strong>: a reference whose OpenAlex record returns 404. The work may exist elsewhere; the link is what's gone.</li>
     </ul>
-    <p>Everything shown is measured from a dated OpenAlex snapshot. Nothing here says whether a paper is right. It shows what a paper rests on, and where the trail stops.</p>
+    </div>
+    </div>
     <form method="dialog"><button>close</button></form>
   </dialog>
 
   <script src="lib/lineage.js"></script>
+  <script src="lib/crawl.js"></script>
   <script src="js/graph.js"></script>
   <script src="js/overview.js"></script>
+  <script src="lib/projection.js"></script>
   <script src="js/cone.js"></script>
+  <script src="js/home.js"></script>
   <script src="js/app.js"></script>
 </body>
 </html>

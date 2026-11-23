@@ -1,11 +1,12 @@
 {
-  "name": "pprhub",
+  "name": "fontis",
   "version": "0.1.0",
   "description": "A GitHub for papers: citation lineage drawn as a commit graph",
   "scripts": {
     "start": "node server.js",
     "snapshot": "node scripts/snapshot.js",
-    "test": "node --test \"test/unit/*.test.js\""
+    "test": "node --test \"test/unit/*.test.js\"",
+    "test:perf": "node --test \"test/perf/*.test.js\""
   },
   "engines": {
     "node": ">=18"

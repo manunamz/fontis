@@ -1,7 +1,7 @@
 /*
  * lineage.js — turn a citation snapshot into a commit graph.
  *
- * The one idea pprhub rests on: a paper's references are its parent commits.
+ * The one idea Fontis rests on: a paper's references are its parent commits.
  * A bibliography is a merge commit, and a lineage is `git log --graph`.
  *
  * Pure functions, no DOM: loaded as a classic script in the browser (as the
@@ -78,60 +78,95 @@
    * dropped and reported in `cut`, since a commit graph can't draw it.
    */
   function order(ids, edges, nodes) {
-    const parentsOf = new Map(ids.map((id) => [id, []]));
-    for (const [c, p] of edges) parentsOf.get(c).push(p);
+    const place = new Map(ids.map((id, i) => [id, i]));
+    const parentsOf = ids.map(() => []);
+    for (const [c, p] of edges) parentsOf[place.get(c)].push(place.get(p));
 
-    const state = new Map();
+    const OPEN = 1;
+    const DONE = 2;
+    const state = new Uint8Array(ids.length);
+    const walked = new Int32Array(ids.length); // parents looked at so far
+    const stack = new Int32Array(ids.length);
     const cut = [];
     const kept = [];
-    for (const start of ids) {
-      if (state.has(start)) continue;
-      const stack = [[start, 0]];
-      state.set(start, 'open');
-      while (stack.length) {
-        const top = stack[stack.length - 1];
-        const [id, i] = top;
-        const ps = parentsOf.get(id);
-        if (i >= ps.length) { state.set(id, 'done'); stack.pop(); continue; }
-        top[1]++;
-        const p = ps[i];
-        if (state.get(p) === 'open') { cut.push([id, p]); continue; }
-        kept.push([id, p]);
-        if (!state.has(p)) { state.set(p, 'open'); stack.push([p, 0]); }
+    for (let start = 0; start < ids.length; start++) {
+      if (state[start]) continue;
+      let depth = 0;
+      stack[depth++] = start;
+      state[start] = OPEN;
+      while (depth) {
+        const id = stack[depth - 1];
+        const ps = parentsOf[id];
+        if (walked[id] >= ps.length) { state[id] = DONE; depth--; continue; }
+        const p = ps[walked[id]++];
+        if (state[p] === OPEN) { cut.push([ids[id], ids[p]]); continue; }
+        kept.push(id, p);
+        if (!state[p]) { state[p] = OPEN; stack[depth++] = p; }
       }
     }
 
     // A dead reference has no year, so it sorts directly beneath the youngest
     // paper citing it. It reads as a short stub rather than a line to nowhere.
-    const yearOf = new Map();
-    for (const id of ids) yearOf.set(id, nodes[id].year);
-    for (const [c, p] of kept) {
-      if (yearOf.get(p) == null) yearOf.set(p, Math.max(yearOf.get(p) ?? -Infinity, yearOf.get(c) ?? -Infinity));
+    const yearOf = ids.map((id) => nodes[id].year);
+    for (let i = 0; i < kept.length; i += 2) {
+      const [c, p] = [kept[i], kept[i + 1]];
+      if (yearOf[p] == null) yearOf[p] = Math.max(yearOf[p] ?? -Infinity, yearOf[c] ?? -Infinity);
     }
 
-    const pending = new Map(ids.map((id) => [id, 0]));
-    const childrenOf = new Map(ids.map((id) => [id, []]));
-    for (const [c, p] of kept) {
-      pending.set(p, pending.get(p) + 1);
-      childrenOf.get(c).push(p);
+    const pending = new Int32Array(ids.length);
+    const childrenOf = ids.map(() => []);
+    for (let i = 0; i < kept.length; i += 2) {
+      pending[kept[i + 1]]++;
+      childrenOf[kept[i]].push(kept[i + 1]);
     }
+    const cited = ids.map((id) => nodes[id].cited || 0);
+    const missing = ids.map((id) => (nodes[id].missing ? -1 : 0));
     const before = (a, b) =>
-      (yearOf.get(b) ?? -Infinity) - (yearOf.get(a) ?? -Infinity) ||
-      (nodes[a].missing ? -1 : 0) - (nodes[b].missing ? -1 : 0) ||
-      (nodes[b].cited || 0) - (nodes[a].cited || 0) ||
-      (a < b ? -1 : 1);
-    const ready = ids.filter((id) => pending.get(id) === 0);
+      (yearOf[b] ?? -Infinity) - (yearOf[a] ?? -Infinity) ||
+      missing[a] - missing[b] ||
+      cited[b] - cited[a] ||
+      (ids[a] < ids[b] ? -1 : 1);
+    // Ranked once, so the queue compares numbers. It's a heap because a big
+    // tree holds thousands here.
+    const ranked = ids.map((_, i) => i).sort(before);
+    const rank = new Int32Array(ids.length);
+    ranked.forEach((id, i) => { rank[id] = i; });
+    const ready = [];
+    const enqueue = (id) => {
+      const at = rank[id];
+      let i = ready.length;
+      ready.push(at);
+      while (i > 0) {
+        const up = (i - 1) >> 1;
+        if (ready[up] <= at) break;
+        ready[i] = ready[up];
+        i = up;
+      }
+      ready[i] = at;
+    };
+    const dequeue = () => {
+      const first = ready[0];
+      const last = ready.pop();
+      for (let i = 0; ready.length;) {
+        let down = i * 2 + 1;
+        if (down >= ready.length) { ready[i] = last; break; }
+        if (down + 1 < ready.length && ready[down + 1] < ready[down]) down++;
+        if (ready[down] >= last) { ready[i] = last; break; }
+        ready[i] = ready[down];
+        i = down;
+      }
+      return ranked[first];
+    };
+    for (let id = 0; id < ids.length; id++) if (pending[id] === 0) enqueue(id);
     const rows = [];
     while (ready.length) {
-      ready.sort(before);
-      const id = ready.shift();
-      rows.push(id);
-      for (const p of childrenOf.get(id)) {
-        pending.set(p, pending.get(p) - 1);
-        if (pending.get(p) === 0) ready.push(p);
-      }
+      const id = dequeue();
+      rows.push(ids[id]);
+      for (const p of childrenOf[id]) if (--pending[p] === 0) enqueue(p);
     }
-    return { rows, edges: kept, cut };
+    const pairs = [];
+    for (let i = 0; i < kept.length; i += 2) pairs.push([ids[kept[i]], ids[kept[i + 1]]]);
+    return { rows, edges: pairs, cut };
   }
 
   /*
@@ -207,46 +242,76 @@
     const sectorFor = (id) => sectorOf.get(id) ?? 0;
     const groupFor = grouped ? sectorFor : () => 0;
 
-    const lanes = [{ wants: rows[0], color: 0 }]; // lane index -> { wants: id, color } | null
+    const lanes = []; // lane index -> { wants: id, color } | null
+    const wanting = new Map(); // id -> lanes running toward it
     const laneSector = [null];
+    const lanesOf = new Map(); // group -> its lanes, leftmost first
+    const placeOf = [null]; // lane -> its place in its group
+    const scanFrom = new Map(); // group -> no free lane sits before this place
+    const setLane = (i, value) => {
+      if (lanes[i]) {
+        const waiting = wanting.get(lanes[i].wants);
+        waiting[waiting.indexOf(i)] = waiting[waiting.length - 1];
+        waiting.pop();
+      }
+      lanes[i] = value;
+      if (!value) {
+        const group = laneSector[i];
+        if (i > 0) scanFrom.set(group, Math.min(scanFrom.get(group), placeOf[i]));
+        return;
+      }
+      const waiting = wanting.get(value.wants);
+      if (waiting) waiting.push(i);
+      else wanting.set(value.wants, [i]);
+    };
+    const leftmostWanting = (id) => (wanting.get(id) || []).reduce((a, b) => (a === -1 || b < a ? b : a), -1);
+    setLane(0, { wants: rows[0], color: 0 });
     let nextColor = 1;
     const openLane = (wants, color) => {
       const group = groupFor(wants);
-      let i = lanes.findIndex((l, at) => at > 0 && l === null && laneSector[at] === group);
-      if (i === -1) { i = lanes.length; lanes.push(null); laneSector.push(group); }
-      lanes[i] = { wants, color };
-      return i;
+      if (!lanesOf.has(group)) lanesOf.set(group, []);
+      const held = lanesOf.get(group);
+      let place = scanFrom.get(group) ?? 0;
+      while (place < held.length && lanes[held[place]] !== null) place++;
+      scanFrom.set(group, place);
+      if (place === held.length) {
+        held.push(lanes.length);
+        placeOf.push(place);
+        lanes.push(null);
+        laneSector.push(group);
+      }
+      setLane(held[place], { wants, color });
+      return held[place];
     };
 
     const placed = [];
     const paths = [];
     const arrivals = new Map(); // parent id -> paths still running toward it
     rows.forEach((id, row) => {
-      const waiting = [];
-      lanes.forEach((l, i) => { if (l && l.wants === id) waiting.push(i); });
+      const waiting = (wanting.get(id) || []).slice().sort((a, b) => a - b);
       const lane = waiting.length ? waiting[0] : openLane(id, nextColor++);
       const color = lanes[lane].color;
-      for (const i of waiting) lanes[i] = null;
-      lanes[lane] = null;
+      for (const i of waiting) setLane(i, null);
+      setLane(lane, null);
       for (const p of arrivals.get(id) || []) p.toLane = lane;
 
       placed.push({ id, row, lane, color, sector: sectorFor(id) });
 
       parentsOf.get(id).forEach((pid, i) => {
-        let via = lanes.findIndex((l) => l && l.wants === pid);
+        let via = leftmostWanting(pid);
         let edgeColor;
         let join = false;
         if (spineNext.get(id) === pid) {
           via = 0;
           edgeColor = 0;
-          lanes[0] = { wants: pid, color: 0 };
+          setLane(0, { wants: pid, color: 0 });
         } else if (via !== -1) {
           edgeColor = lanes[via].color;
           join = true;
         } else if (i === 0 && lane !== 0 && lanes[lane] === null && groupFor(pid) === laneSector[lane]) {
           via = lane;
           edgeColor = color;
-          lanes[lane] = { wants: pid, color };
+          setLane(lane, { wants: pid, color });
         } else {
           edgeColor = nextColor++;
           via = openLane(pid, edgeColor);
@@ -267,25 +332,38 @@
       path.via = lanePosition.get(path.via);
       path.toLane = lanePosition.get(path.toLane);
     }
+    const papers = new Array(roots.length).fill(0);
+    for (const r of placed) if (sectorOf.has(r.id)) papers[r.sector]++;
     const sectors = roots.map((id, sector) => {
-      const held = grouped ? sorted.filter((lane) => laneSector[lane] === sector).map((lane) => lanePosition.get(lane)) : [];
-      return { id, sector, first: held[0] ?? null, last: held[held.length - 1] ?? null, papers: placed.filter((r) => r.sector === sector && sectorOf.has(r.id)).length };
+      const held = grouped ? (lanesOf.get(sector) || []).map((lane) => lanePosition.get(lane)) : [];
+      return { id, sector, first: held[0] ?? null, last: held[held.length - 1] ?? null, papers: papers[sector] };
     });
 
     return { rows: placed, edges: paths, lanes: lanes.length, sectors, cut };
   }
 
+  // Who cites whom, worked out once per list of edges: a selected paper asks
+  // on every frame.
+  const linkMaps = new WeakMap();
+  function linksOf(edges) {
+    if (linkMaps.has(edges)) return linkMaps.get(edges);
+    const citers = new Map();
+    const cited = new Map();
+    for (const e of edges) {
+      if (!citers.has(e.parent)) citers.set(e.parent, []);
+      citers.get(e.parent).push(e.child);
+      if (!cited.has(e.child)) cited.set(e.child, []);
+      cited.get(e.child).push(e.parent);
+    }
+    const links = { citers, cited };
+    linkMaps.set(edges, links);
+    return links;
+  }
+
   // Everything reachable from `id` in both directions, for tracing one
   // paper's line through the graph.
   function lineage(id, edges) {
-    const up = new Map();
-    const down = new Map();
-    for (const e of edges) {
-      if (!up.has(e.parent)) up.set(e.parent, []);
-      up.get(e.parent).push(e.child);
-      if (!down.has(e.child)) down.set(e.child, []);
-      down.get(e.child).push(e.parent);
-    }
+    const { citers: up, cited: down } = linksOf(edges);
     const walk = (start, next) => {
       const seen = new Set();
       const stack = [start];
@@ -304,14 +382,7 @@
    * seed, then the papers citing it and the papers it cites, up to `limit`.
    */
   function connections(id, edges, limit = CONNECTION_LIMIT) {
-    const citers = new Map();
-    const cited = new Map();
-    for (const e of edges) {
-      if (!citers.has(e.parent)) citers.set(e.parent, []);
-      citers.get(e.parent).push(e.child);
-      if (!cited.has(e.child)) cited.set(e.child, []);
-      cited.get(e.child).push(e.parent);
-    }
+    const { citers, cited } = linksOf(edges);
     const via = new Map([[id, null]]);
     const queue = [id];
     let root = id;
@@ -353,6 +424,32 @@
     return hidden;
   }
 
+  // What a window needs to find without walking the whole tree, worked out
+  // once per layout.
+  const laneMaps = new WeakMap();
+  function lanesIndex(layout) {
+    if (laneMaps.has(layout)) return laneMaps.get(layout);
+    const rowOf = new Map();
+    const rowsIn = new Map();
+    for (const row of layout.rows) {
+      rowOf.set(row.id, row);
+      if (!rowsIn.has(row.lane)) rowsIn.set(row.lane, []);
+      rowsIn.get(row.lane).push(row);
+    }
+    const edgesAt = new Map(); // row number -> indexes into layout.edges
+    layout.edges.forEach((e, i) => {
+      for (const row of [e.from, e.to]) {
+        if (!edgesAt.has(row)) edgesAt.set(row, []);
+        edgesAt.get(row).push(i);
+      }
+    });
+    const index = { rowOf, rowsIn, edgesAt };
+    laneMaps.set(layout, index);
+    return index;
+  }
+
+  const findRow = (layout, id) => lanesIndex(layout).rowOf.get(id);
+
   /*
    * Rotate the graph: a fixed window of side lanes on a loop, so turning either
    * way brings the far side around. The spine stays pinned. Every paper keeps
@@ -376,11 +473,16 @@
     const place = (lane) => (lane - 1 - turned + sideLanes) % sideLanes;
     const inWindow = (lane) => lane === 0 || place(lane) < width;
 
+    const { rowOf, rowsIn, edgesAt } = lanesIndex(layout);
+    const keptRows = [...keep].map((id) => rowOf.get(id)).filter(Boolean);
     const extraLanes = new Set();
-    for (const row of layout.rows) if (keep.has(row.id) && !inWindow(row.lane)) extraLanes.add(row.lane);
-    for (const e of layout.edges) {
-      if (!keep.has(e.child) || !keep.has(e.parent)) continue;
-      for (const lane of [e.fromLane, e.via, e.toLane]) if (!inWindow(lane)) extraLanes.add(lane);
+    for (const row of keptRows) {
+      if (!inWindow(row.lane)) extraLanes.add(row.lane);
+      for (const i of edgesAt.get(row.row) || []) {
+        const e = layout.edges[i];
+        if (!keep.has(e.child) || !keep.has(e.parent)) continue;
+        for (const lane of [e.fromLane, e.via, e.toLane]) if (!inWindow(lane)) extraLanes.add(lane);
+      }
     }
     const extra = new Map([...extraLanes].sort((a, b) => a - b).map((lane, i) => [lane, width + 1 + i]));
 
@@ -392,14 +494,19 @@
     // Which way round is shorter to reach a lane that's out of view.
     const towards = (lane) => (place(lane) - width < sideLanes - place(lane) ? 1 : -1);
 
+    const inView = new Set([...(rowsIn.get(0) || []), ...keptRows]);
+    for (let i = 0; i < width; i++) {
+      for (const row of rowsIn.get((turned + i) % sideLanes + 1) || []) inView.add(row);
+    }
     const rows = [];
     const shown = new Set();
     const kept = new Set();
-    for (const row of layout.rows) {
+    const touching = new Set();
+    for (const row of [...inView].sort((a, b) => a.row - b.row)) {
       if (keep.has(row.id)) kept.add(row.row);
-      if (!inWindow(row.lane) && !keep.has(row.id)) continue;
       rows.push({ ...row, lane: visible(row.lane) });
       shown.add(row.id);
+      for (const i of edgesAt.get(row.row) || []) touching.add(i);
     }
 
     const edges = [];
@@ -409,7 +516,8 @@
       if (!stubs.has(key)) stubs.set(key, { row, lane, dir, color, links: [] });
       stubs.get(key).links.push(link);
     };
-    for (const e of layout.edges) {
+    for (const i of [...touching].sort((a, b) => a - b)) {
+      const e = layout.edges[i];
       const [from, via, to] = [visible(e.fromLane), visible(e.via), visible(e.toLane)];
       const [showsChild, showsParent] = [shown.has(e.child), shown.has(e.parent)];
       if (showsChild && showsParent && via !== null) {
@@ -417,8 +525,8 @@
         continue;
       }
       const away = [e.via, e.toLane, e.fromLane].find((lane) => visible(lane) === null) ?? e.toLane;
-      if (showsChild) addStub(e.from, from, towards(away), e.color, { id: e.parent, cites: true });
-      if (showsParent) addStub(e.to, to, towards(away), e.color, { id: e.child, cites: false });
+      if (showsChild) addStub(e.from, from, towards(away), e.color, { id: e.parent, cites: true, paper: e.child });
+      if (showsParent) addStub(e.to, to, towards(away), e.color, { id: e.child, cites: false, paper: e.parent });
     }
     return { rows, edges, stubs: [...stubs.values()], lanes: width + 1, drawnLanes: width + 1 + extra.size, kept, offset: turned, sideLanes, rotates: true, totalRows: layout.rows.length };
   }
@@ -456,5 +564,5 @@
     return Math.max(0, measured - shown.size);
   }
 
-  return { select, order, layout, lineage, connections, rankParents, frontier, hiddenCount, hiddenParents, isSuspect, windowView, compactRows, offsetFor };
+  return { select, order, layout, findRow, lineage, connections, rankParents, frontier, hiddenCount, hiddenParents, isSuspect, windowView, compactRows, offsetFor };
 });
